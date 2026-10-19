@@ -1,0 +1,37 @@
+version: 2
+
+updates:
+  # Rust crates declared in Cargo.toml. Cargo.lock is committed, so Dependabot
+  # sees transitive dependencies too -- which is where most advisories land.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 10
+    groups:
+      # Minor and patch bumps arrive as one PR to keep review noise down;
+      # majors stay separate so breaking changes get their own review.
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Actions in .github/workflows. These are SHA-pinned; Dependabot bumps the
+  # SHA and keeps the trailing "# vX.Y.Z" comment in sync.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
