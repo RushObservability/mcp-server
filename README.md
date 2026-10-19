@@ -4,10 +4,11 @@
 server for [Rush Observability](https://github.com/RushObservability). It lets
 AI assistants such as Claude Code, Claude Desktop, Cursor and VS Code search
 logs and APM spans, read traces, run PromQL, check service health, compare
-time windows and run saved queries, and link every answer back to the Rush UI.
+time windows, read monitors, SLOs, anomalies and dashboards, and run saved
+queries, and link every answer back to the Rush UI.
 
-> **Status:** v0.1, read-only. Monitors, SLOs, dashboards and SRE-agent
-> handoff come in later releases.
+> **Status:** read-only. Handing an investigation to the Rush SRE agent and
+> write tools (muting monitors, recording deploys) come in later releases.
 
 ## How it works
 
@@ -49,8 +50,9 @@ published for each version tag.
 In Rush, go to **Settings → API Keys**, create a **Query** key, and choose a
 role:
 
-- **Viewer** (default) is enough for every tool in this release.
-- **Write** is only needed by write tools in later releases.
+- **Viewer** (default) is enough for every tool except `preview_monitor`.
+- **Write** is needed for `preview_monitor`, because Rush only lets
+  writers simulate monitors, and for write tools in later releases.
 
 A key is scoped to the tenant it was created in, so the server only ever sees
 that tenant's data. Rush records the key, and the tool that used it, with each
@@ -130,14 +132,41 @@ docker run --rm -i -e RUSH_URL=https://rush.example.com -e RUSH_API_KEY=rush_qry
 | `get_service_latency` | analysis | Latency distribution for one service (p50/p95/p99 and counts per latency band) and where request time goes: the service itself vs database calls, per database. |
 | `get_log_context` | analysis | Log lines written just before and after one log line, oldest first, with the original line marked. Takes the `ref` from a search_logs sample. |
 | `get_log_record` | analysis | Full detail of one log line (body plus resource and log attributes), from the `ref` in a search_logs sample. |
+| `list_monitors` | alerting | List monitors with their state (alert, warn, no_data, ok) and whether they are muted, worst first, with counts per state. Filter by state or text. |
+| `get_monitor` | alerting | One monitor in full: query, thresholds, evaluation settings, state per group, notification message and recent state changes. Takes a monitor ID or Rush link. |
+| `preview_monitor` | alerting | Simulate a proposed monitor over recent data without saving it: current value per group, value ranges, and the alerts it would have raised. Rush requires a write-role API key for previews. |
+| `list_slos` | alerting | List SLOs with state, target, measured success rate and error budget left, breaching and lowest-budget first. |
+| `get_slo` | alerting | One SLO in full: target, measured success rate, error and total counts, error budget left, and recent state changes. Takes an SLO ID or Rush link. |
+| `list_anomalies` | alerting | List anomaly detections. By default returns rules that are currently anomalous, with value, expected value and deviation in standard deviations; set include_resolved for recent history. |
+| `get_anomaly` | alerting | One anomaly event with its detection rule and, for HTTP status anomalies, the services emitting that status and sample logs around the time. |
+| `search_dashboards` | dashboards | Find dashboards by name, description or tag, most recently updated first. |
+| `get_dashboard_summary` | dashboards | A dashboard's widgets (ID, title, type and each query as PromQL or filter text), variables and default time range, without layout. Use before get_widget_data. |
+| `get_dashboard` | dashboards | A dashboard's full definition (settings, variables and complete widget configurations, as exported by Rush). Large; prefer get_dashboard_summary unless the raw configuration is needed. |
+| `get_widget_data` | dashboards | Run one dashboard widget's queries the way the Rush UI does and return the numbers: totals, values over time, or values per group (PromQL widgets are summarized per series). Applies dashboard variables. |
 | `list_deploys` | changes | List deploy markers (service, version, commit, environment, who and when), newest first. Defaults to the last 7 days. Use to line up changes with errors or latency. |
 | `list_saved_queries` | saved_queries | List saved Explore queries visible to this key: shared with the tenant, with its groups, or its own. Each has a description of why it is useful. |
 | `run_saved_query` | saved_queries | Run a saved Explore query by ID or Rush link and return the same summary as search_logs or search_spans, plus the saved query's name and description. |
 <!-- tools:end -->
 
 Toolsets are enabled with `--toolsets` (default
-`core,analysis,changes,saved_queries`, or `all`). Narrow them further with
-`--enable-tools` and `--disable-tools`.
+`core,analysis,alerting,changes,saved_queries`; `dashboards` is opt-in; or
+`all`). Narrow them further with `--enable-tools` and `--disable-tools`.
+
+## Prompts and resources
+
+Prompts are ready-made investigations you can start from your client's prompt
+menu. Each appears only when the toolsets it uses are enabled.
+
+| Prompt | Arguments | What it does |
+|---|---|---|
+| `triage_service` | `service`, `last` | Checks a service's health and, if something is wrong, narrows down where and why |
+| `investigate_alert` | `alert` | Works through a firing monitor or anomaly: re-runs the signal, compares before and after, checks deploys |
+| `deploy_review` | `service`, `version` | Compares errors and latency before and after a deploy |
+| `slow_endpoint` | `service`, `endpoint`, `last` | Finds what slow requests to one endpoint have in common |
+
+Two resources can be attached as context: `rush://context` (same as
+`get_context`) and `rush://services` (same as `list_services` for the last
+hour).
 
 ## Configuration
 
@@ -147,7 +176,7 @@ Toolsets are enabled with `--toolsets` (default
 | `--web-url` | `RUSH_WEB_URL` | `--url` | Rush UI base URL used in links |
 | `--api-key` | `RUSH_API_KEY` | | Query API key (`rush_qry_…`) |
 | `--api-key-file` | `RUSH_API_KEY_FILE` | | File with the key, re-read on every request so a rotated key needs no restart |
-| `--toolsets` | `RUSH_MCP_TOOLSETS` | `core,analysis,changes,saved_queries` | Toolsets to enable, or `all` |
+| `--toolsets` | `RUSH_MCP_TOOLSETS` | `core,analysis,alerting,changes,saved_queries` | Toolsets to enable, or `all` |
 | `--enable-tools` | | | Only expose these tools |
 | `--disable-tools` | | | Hide these tools |
 | `--max-result-bytes` | `RUSH_MCP_MAX_RESULT_BYTES` | `16384` | Result size budget |
@@ -195,8 +224,9 @@ Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 make ci     # formatting, Clippy, tests, build
 ```
 
-`scripts/smoke.py` drives every tool against a real Rush deployment over stdio
-and prints each result's summary, size and timing:
+`scripts/smoke.py` drives every tool, prompt and resource against a real Rush
+deployment over stdio and prints each result's summary, size and timing. Set
+`RUSH_KEY_ROLE=write` when the key can preview monitors:
 
 ```bash
 RUSH_URL=https://rush.example.com RUSH_API_KEY=rush_qry_… python3 scripts/smoke.py target/release/rush-mcp

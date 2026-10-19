@@ -91,6 +91,40 @@ sq = call("list_saved_queries", {})
 if sq and sq["result"]["queries"]:
     call("run_saved_query", {"saved_query": sq["result"]["queries"][0]["id"]})
 call("get_link", {"kind": "explore", "signal": "logs", "service": service, "last": "15m"})
+mons = call("list_monitors", {})
+if mons and mons["result"]["monitors"]:
+    call("get_monitor", {"monitor": mons["result"]["monitors"][0]["id"]})
+# Previews need a write-role key; a viewer key gets a readable error.
+call("preview_monitor", {"type": "apm", "query_config": {"service": service or "x", "metric": "error_rate"}, "critical": 5, "lookback": "1h"},
+     expect_error=os.environ.get("RUSH_KEY_ROLE", "viewer") != "write")
+slos = call("list_slos", {})
+if slos and slos["result"]["slos"]:
+    call("get_slo", {"slo": slos["result"]["slos"][0]["id"]})
+call("list_anomalies", {})
+anoms = call("list_anomalies", {"include_resolved": True, "limit": 5})
+if anoms and anoms["result"]["anomalies"]:
+    call("get_anomaly", {"event_id": anoms["result"]["anomalies"][0]["event_id"]})
+dash = call("search_dashboards", {})
+if dash and dash["result"]["dashboards"]:
+    did = dash["result"]["dashboards"][0]["id"]
+    summ = call("get_dashboard_summary", {"dashboard": did})
+    call("get_dashboard", {"dashboard": did})
+    if summ and summ["result"]["widgets"]:
+        for w in summ["result"]["widgets"][:4]:
+            call("get_widget_data", {"dashboard": did, "widget": w["id"]})
+prompts = send("prompts/list", {}).get("result", {}).get("prompts", [])
+print(f"  prompts: {', '.join(p['name'] for p in prompts)}")
+if prompts:
+    got = send("prompts/get", {"name": "triage_service", "arguments": {"service": service or "x"}})
+    print(f"  prompts/get triage_service: {'ok' if 'result' in got else got.get('error')}")
+res = send("resources/list", {}).get("result", {}).get("resources", [])
+print(f"  resources: {', '.join(r['uri'] for r in res)}")
+for r in res:
+    got = send("resources/read", {"uri": r["uri"]})
+    ok = "result" in got and got["result"]["contents"][0]["text"].startswith("{")
+    print(f"  resources/read {r['uri']}: {'ok' if ok else got.get('error')}")
+    if not ok:
+        failures.append(r["uri"])
 p.stdin.close(); p.terminate()
 if failures:
     sys.exit(f"failed: {', '.join(failures)}")
