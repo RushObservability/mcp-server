@@ -7,6 +7,7 @@ pub mod envelope;
 pub mod http;
 pub mod links;
 pub mod metrics;
+pub mod prompts;
 pub mod server;
 pub mod time;
 pub mod tools;

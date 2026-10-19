@@ -6,9 +6,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rmcp::{
-    RoleServer, ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Json},
-    model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig},
+    ErrorData, RoleServer, ServerHandler,
+    handler::server::{
+        router::{prompt::PromptRouter, tool::ToolRouter},
+        wrapper::{Json, Parameters},
+    },
+    model::{
+        CallToolResult, Implementation, ListResourcesResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+        ResourceContents, ServerCapabilities, ServerConfig,
+    },
+    prompt_handler,
     service::RequestContext,
     tool_handler,
 };
@@ -131,12 +139,26 @@ pub type ToolResult<R> = Result<Json<Envelope<R>>, CallToolResult>;
 pub struct RushMcp {
     pub(crate) state: Arc<AppState>,
     tool_router: ToolRouter<Self>,
+    prompt_router: PromptRouter<Self>,
 }
 
 impl RushMcp {
     pub fn new(state: Arc<AppState>) -> Self {
         let tool_router = build_router(&state);
-        Self { state, tool_router }
+        let prompt_router = build_prompts(&state);
+        Self {
+            state,
+            tool_router,
+            prompt_router,
+        }
+    }
+
+    pub fn prompt_names(&self) -> Vec<String> {
+        self.prompt_router
+            .list_all()
+            .into_iter()
+            .map(|p| p.name.to_string())
+            .collect()
     }
 
     pub fn tool_names(&self) -> Vec<String> {
@@ -239,6 +261,8 @@ fn build_router(state: &AppState) -> ToolRouter<RushMcp> {
         router.merge(match toolset {
             Toolset::Core => RushMcp::core_router(),
             Toolset::Analysis => RushMcp::analysis_router(),
+            Toolset::Alerting => RushMcp::alerting_router(),
+            Toolset::Dashboards => RushMcp::dashboards_router(),
             Toolset::Changes => RushMcp::changes_router(),
             Toolset::SavedQueries => RushMcp::saved_queries_router(),
         });
@@ -259,14 +283,130 @@ fn build_router(state: &AppState) -> ToolRouter<RushMcp> {
     router
 }
 
+/// Toolsets a prompt's steps rely on; the prompt is hidden unless all are enabled.
+fn prompt_needs(name: &str) -> &'static [Toolset] {
+    match name {
+        "triage_service" => &[Toolset::Core, Toolset::Analysis, Toolset::Changes],
+        "investigate_alert" => &[Toolset::Core, Toolset::Analysis, Toolset::Alerting],
+        "deploy_review" => &[Toolset::Core, Toolset::Analysis, Toolset::Changes],
+        "slow_endpoint" => &[Toolset::Core, Toolset::Analysis],
+        _ => &[],
+    }
+}
+
+fn build_prompts(state: &AppState) -> PromptRouter<RushMcp> {
+    let mut router = RushMcp::prompt_router();
+    let names: Vec<String> = router
+        .list_all()
+        .into_iter()
+        .map(|p| p.name.to_string())
+        .collect();
+    for name in names {
+        if !prompt_needs(&name)
+            .iter()
+            .all(|t| state.toolsets.contains(t))
+        {
+            router.remove_route(&name);
+        }
+    }
+    router
+}
+
+const CONTEXT_URI: &str = "rush://context";
+const SERVICES_URI: &str = "rush://services";
+
 #[tool_handler(router = self.tool_router)]
+#[prompt_handler(router = self.prompt_router)]
 impl ServerHandler for RushMcp {
     fn get_info(&self) -> ServerConfig {
         let mut implementation = Implementation::new("rush-mcp", env!("CARGO_PKG_VERSION"));
         implementation.title = Some("Rush Observability".into());
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        let caps = if self.prompt_router.list_all().is_empty() {
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build()
+        } else {
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .enable_resources()
+                .build()
+        };
+        ServerConfig::new(caps)
             .with_server_info(implementation)
             .with_instructions(self.state.instructions.clone())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let mut resources = Vec::new();
+        if self.state.toolsets.contains(&Toolset::Core) {
+            resources.push(
+                Resource::new(CONTEXT_URI, "context")
+                    .with_title("Rush context")
+                    .with_description("Tenant, identity, enabled features and toolsets, and last-hour volumes (same as get_context).")
+                    .with_mime_type("application/json"),
+            );
+            resources.push(
+                Resource::new(SERVICES_URI, "services")
+                    .with_title("Rush services")
+                    .with_description("Services with request count, errors and latency over the last hour (same as list_services).")
+                    .with_mime_type("application/json"),
+            );
+        }
+        Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let unknown =
+            || ErrorData::resource_not_found(format!("unknown resource {}", request.uri), None);
+        if !self.state.toolsets.contains(&Toolset::Core) {
+            return Err(unknown());
+        }
+        let result = match request.uri.as_str() {
+            CONTEXT_URI => self
+                .get_context(context)
+                .await
+                .map(|Json(env)| serde_json::to_string(&env)),
+            SERVICES_URI => self
+                .list_services(
+                    Parameters(crate::tools::core::ListServicesArgs {
+                        contains: None,
+                        limit: Some(50),
+                        time: Default::default(),
+                    }),
+                    context,
+                )
+                .await
+                .map(|Json(env)| serde_json::to_string(&env)),
+            _ => return Err(unknown()),
+        };
+        let text = match result {
+            Ok(Ok(json)) => json,
+            Ok(Err(e)) => return Err(ErrorData::internal_error(e.to_string(), None)),
+            Err(tool_err) => {
+                let message = tool_err
+                    .content
+                    .iter()
+                    .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return Err(ErrorData::internal_error(message, None));
+            }
+        };
+        let mut contents = ResourceContents::text(text, request.uri.clone());
+        if let ResourceContents::TextResourceContents { mime_type, .. } = &mut contents {
+            *mime_type = Some("application/json".into());
+        }
+        Ok(ReadResourceResult::new(vec![contents]).into())
     }
 }
 
@@ -318,7 +458,8 @@ mod tests {
     #[test]
     fn readme_tool_table_matches_the_code() {
         let table = tools_markdown(Arc::new(state(Toolset::ALL.to_vec())));
-        let readme = include_str!("../README.md");
+        // Windows checkouts may convert the README to CRLF line endings.
+        let readme = include_str!("../README.md").replace("\r\n", "\n");
         let start = readme
             .find("<!-- tools:start -->")
             .expect("README needs <!-- tools:start -->");
@@ -330,6 +471,30 @@ mod tests {
             current,
             table.trim(),
             "README tool table is out of date; replace it with:\n{table}"
+        );
+    }
+
+    #[test]
+    fn prompts_appear_only_when_their_toolsets_are_enabled() {
+        let mut all = RushMcp::new(Arc::new(state(Toolset::ALL.to_vec()))).prompt_names();
+        all.sort();
+        assert_eq!(
+            all,
+            [
+                "deploy_review",
+                "investigate_alert",
+                "slow_endpoint",
+                "triage_service"
+            ]
+        );
+        let mut core_analysis =
+            RushMcp::new(Arc::new(state(vec![Toolset::Core, Toolset::Analysis]))).prompt_names();
+        core_analysis.sort();
+        assert_eq!(core_analysis, ["slow_endpoint"]);
+        assert!(
+            RushMcp::new(Arc::new(state(vec![Toolset::Changes])))
+                .prompt_names()
+                .is_empty()
         );
     }
 

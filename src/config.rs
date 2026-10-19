@@ -40,7 +40,7 @@ pub struct Config {
         long,
         env = "RUSH_MCP_TOOLSETS",
         value_delimiter = ',',
-        default_value = "core,analysis,changes,saved_queries"
+        default_value = "core,analysis,alerting,changes,saved_queries"
     )]
     pub toolsets: Vec<String>,
 

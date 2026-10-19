@@ -1388,7 +1388,7 @@ impl RushMcp {
         description = "Start here. Returns the tenant and identity behind the API key, server time (UTC), enabled Rush features and toolsets, and how many logs and spans arrived in the last hour.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn get_context(
+    pub(crate) async fn get_context(
         &self,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<Envelope<Context>>, CallToolResult> {
@@ -1884,7 +1884,7 @@ impl RushMcp {
         description = "List services with request count, errors, error rate and p50/p95/p99 latency, busiest first.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn list_services(
+    pub(crate) async fn list_services(
         &self,
         Parameters(args): Parameters<ListServicesArgs>,
         ctx: RequestContext<RoleServer>,

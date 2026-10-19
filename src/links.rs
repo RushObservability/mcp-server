@@ -119,6 +119,42 @@ impl Links {
     pub fn deploys(&self) -> String {
         self.build("/deploys", &[])
     }
+
+    pub fn monitors(&self) -> String {
+        self.build("/alerts", &[])
+    }
+
+    pub fn monitor(&self, id: &str) -> String {
+        self.build(&format!("/alerts/{}", urlencode_path(id)), &[])
+    }
+
+    pub fn slos(&self) -> String {
+        self.build("/slos", &[])
+    }
+
+    pub fn slo(&self, id: &str) -> String {
+        self.build(&format!("/slos/{}", urlencode_path(id)), &[])
+    }
+
+    pub fn anomalies(&self) -> String {
+        self.build("/anomaly", &[])
+    }
+
+    /// Rush has no page for a single anomaly event; the rule page lists its events.
+    pub fn anomaly_rule(&self, rule_id: &str) -> String {
+        self.build(&format!("/anomaly/rules/{}", urlencode_path(rule_id)), &[])
+    }
+
+    pub fn dashboards(&self) -> String {
+        self.build("/dashboards", &[])
+    }
+
+    pub fn dashboard(&self, id: &str, window: Option<&Window>) -> String {
+        let params = window
+            .map(|w| vec![("t", w.duration().num_minutes().max(1).to_string())])
+            .unwrap_or_default();
+        self.build(&format!("/dashboards/{}", urlencode_path(id)), &params)
+    }
 }
 
 fn urlencode_path(segment: &str) -> String {
@@ -147,6 +183,29 @@ pub fn trace_id_from(input: &str) -> Option<String> {
     url.query_pairs()
         .find(|(k, v)| k == "trace" && is_trace_id(v))
         .map(|(_, v)| v.to_ascii_lowercase())
+}
+
+/// An ID from a raw value or the path segment after `segment` in a Rush URL,
+/// e.g. `id_from("https://rush/alerts/abc", "alerts")` is `abc`.
+pub fn id_from(input: &str, segment: &str) -> Option<String> {
+    let s = input.trim();
+    if let Ok(url) = Url::parse(s) {
+        let mut segs = url.path_segments()?;
+        while let Some(seg) = segs.next() {
+            if seg == segment {
+                return segs.next().filter(|id| is_plain_id(id)).map(str::to_string);
+            }
+        }
+        return None;
+    }
+    is_plain_id(s).then(|| s.to_string())
+}
+
+fn is_plain_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// A saved-query ID from a raw ID or a Rush `?saved=<id>` URL.
@@ -254,5 +313,12 @@ mod tests {
             Some("c7e43c71-2aa5")
         );
         assert_eq!(saved_query_id_from("../etc"), None);
+        assert_eq!(
+            id_from("https://rush.example.com/alerts/m-1?tenant=prod", "alerts").as_deref(),
+            Some("m-1")
+        );
+        assert_eq!(id_from("m-1", "alerts").as_deref(), Some("m-1"));
+        assert_eq!(id_from("https://rush.example.com/slos/s1", "alerts"), None);
+        assert_eq!(id_from("a/b", "alerts"), None);
     }
 }
