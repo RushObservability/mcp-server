@@ -1,0 +1,50 @@
+name: Rust CI
+
+on:
+  pull_request: {}
+  # Also run on main. Without this, a merge-order interaction between two
+  # independently-green PRs lands untested.
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    # Mirrors the release.yml build matrix exactly. Previously CI ran only on
+    # ubuntu while releases shipped four targets, so macOS and Windows
+    # breakage stayed invisible until a tag was cut.
+    name: Test and build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build all targets
+        run: cargo build --locked --all-targets

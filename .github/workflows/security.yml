@@ -1,0 +1,58 @@
+name: Security and quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, so advisories published after a merge still surface.
+    - cron: "31 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gitleaks scans history, so a shallow clone would hide most of it.
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # reviewed 2026-08-02
+        with:
+          # Pinned, not "stable": a new stable can add lints and turn this gate
+          # red with no code change. Matches the other Rust repos in the org.
+          toolchain: 1.88.0
+          components: rustfmt, clippy
+
+      - name: Install dependency scanners
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+
+      - name: Scan repository history for secrets
+        # Pinned to the multi-arch index digest, not a per-arch leaf -- an arm64
+        # leaf digest fails with "exec format error" on amd64 runners.
+        run: docker run --rm --volume "${PWD}:/repo:ro" ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f git /repo --redact --no-banner
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Scan RustSec advisories
+        run: cargo audit
+
+      - name: Enforce dependency policy
+        run: cargo deny check --hide-inclusion-graph advisories bans licenses sources

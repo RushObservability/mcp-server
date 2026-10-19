@@ -1,0 +1,10 @@
+# Pin the toolchain so local builds, CI and releases use the same compiler.
+# Without this, CI installs whatever "stable" is that day and the build drifts.
+# Matches query-api, mysql-collector and postgresql-collector, which pin 1.88.0.
+#
+# rustup reads this automatically for cargo invocations in this directory, so
+# no workflow change is needed.
+[toolchain]
+channel = "1.88.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
