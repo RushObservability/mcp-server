@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{
+    CallToolRequestParams, GetPromptRequestParams, ReadResourceRequestParams, ResourceContents,
+};
 use rmcp::{RoleClient, ServiceExt, service::RunningService};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, header, method, path};
@@ -267,5 +269,135 @@ async fn results_respect_the_byte_budget() {
     assert!(!is_error, "{out}");
     assert_eq!(out["truncated"], true);
     assert!(serde_json::to_vec(&out).unwrap().len() <= 4096);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn prompts_render_with_arguments() {
+    let rush = MockServer::start().await;
+    let client = connect(&rush, &[]).await;
+    let prompts = client.list_all_prompts().await.unwrap();
+    assert_eq!(prompts.len(), 4);
+    let got = client
+        .get_prompt(
+            GetPromptRequestParams::new("triage_service").with_arguments(
+                json!({"service": "checkout", "last": "24h"})
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&got.messages).unwrap();
+    assert!(text.contains("`checkout`"), "{text}");
+    assert!(text.contains("last 24h"), "{text}");
+    assert!(text.contains("get_service"));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resources_return_tool_output_as_json() {
+    let rush = MockServer::start().await;
+    Mock::given(path("/api/v1/services/graph"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"nodes": [{"service_name": "api", "request_count": 10, "error_count": 1, "p95_ms": 12.5}], "edges": []})))
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &[]).await;
+    let uris: Vec<String> = client
+        .list_all_resources()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.uri.to_string())
+        .collect();
+    assert_eq!(uris, ["rush://context", "rush://services"]);
+    let read = client
+        .read_resource(ReadResourceRequestParams::new("rush://services"))
+        .await
+        .unwrap();
+    let ResourceContents::TextResourceContents {
+        text, mime_type, ..
+    } = &read.contents[0]
+    else {
+        panic!("expected text")
+    };
+    assert_eq!(mime_type.as_deref(), Some("application/json"));
+    let v: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(v["result"]["services"][0]["service"], "api");
+    assert!(
+        client
+            .read_resource(ReadResourceRequestParams::new("rush://nope"))
+            .await
+            .is_err()
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn monitors_are_listed_worst_first_and_previews_explain_missing_write_access() {
+    let rush = MockServer::start().await;
+    Mock::given(path("/api/v1/monitors"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"monitors": [
+            {"id": "m1", "name": "latency", "type": "apm", "state": "ok", "enabled": true},
+            {"id": "m2", "name": "errors", "type": "apm", "state": "alert", "enabled": true, "group_states": {"service=checkout": "alert"}},
+            {"id": "m3", "name": "old", "type": "log", "state": "alert", "enabled": false}
+        ]})))
+        .mount(&rush)
+        .await;
+    Mock::given(path("/api/v1/monitors/preview"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("write role required"))
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &[]).await;
+    let (is_error, out, _) = call(&client, "list_monitors", json!({})).await;
+    assert!(!is_error, "{out}");
+    assert_eq!(
+        out["summary"],
+        "3 monitors: 1 alert, 0 warn, 0 no data, 1 muted."
+    );
+    assert_eq!(out["result"]["monitors"][0]["id"], "m2");
+    assert_eq!(
+        out["result"]["monitors"][0]["problem_groups"][0],
+        "service=checkout (alert)"
+    );
+    assert_eq!(out["result"]["monitors"][2]["muted"], true);
+
+    let (is_error, _, text) = call(&client, "preview_monitor", json!({"type": "apm", "query_config": {"service": "checkout", "metric": "error_rate"}, "critical": 5})).await;
+    assert!(is_error);
+    assert!(text.contains("write-role"), "{text}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn widget_data_runs_the_widget_query_with_variables() {
+    let rush = MockServer::start().await;
+    Mock::given(path("/api/v1/dashboards/d1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "d1", "name": "Checkout", "defaults": {"time_range_minutes": 30},
+            "variables": [{"name": "service", "type": "static", "default": "api"}],
+            "widgets": [{"id": "w1", "title": "Errors by path", "widget_type": "bar",
+                         "query_config": {"source": "spans", "group_by": ["http_path"], "filters": [{"field": "service_name", "op": "=", "value": "$service"}]}}]
+        })))
+        .mount(&rush)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/query/group"))
+        .and(body_partial_json(json!({"group_by": ["http_path"], "filters": [{"field": "service_name", "op": "=", "value": "checkout"}]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"groups": [{"http_path": "/pay", "count": 7}]})))
+        .expect(1)
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &[]).await;
+    let (is_error, out, _) = call(&client, "get_widget_data", json!({"dashboard": "https://rush.example.com/dashboards/d1", "widget": "errors by path", "variables": {"service": "checkout"}})).await;
+    assert!(!is_error, "{out}");
+    assert_eq!(
+        out["result"]["queries"][0]["groups"][0],
+        json!({"key": "/pay", "value": 7.0})
+    );
+    assert_eq!(
+        out["result"]["queries"][0]["query"],
+        "service_name=checkout"
+    );
     client.cancel().await.unwrap();
 }

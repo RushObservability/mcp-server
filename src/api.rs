@@ -733,6 +733,269 @@ pub struct Capabilities {
     pub write: bool,
 }
 
+// ── Monitors ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct MonitorsResponse {
+    pub monitors: Vec<Monitor>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct MonitorDetailResponse {
+    pub monitor: Monitor,
+    pub events: Vec<MonitorEvent>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct Monitor {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub monitor_type: String,
+    pub query_config: serde_json::Value,
+    pub critical: Option<f64>,
+    pub critical_recovery: Option<f64>,
+    pub warning: Option<f64>,
+    pub warning_recovery: Option<f64>,
+    pub comparator: String,
+    pub eval_window_secs: i64,
+    pub eval_interval_secs: i64,
+    pub group_by: serde_json::Value,
+    pub state: String,
+    pub group_states: serde_json::Value,
+    pub no_data_action: String,
+    pub message: String,
+    pub tags: serde_json::Value,
+    pub priority: Option<i64>,
+    /// false means muted.
+    pub enabled: bool,
+    pub composite_formula: String,
+    pub last_eval_at: Option<String>,
+    pub last_triggered_at: Option<String>,
+    pub created_by: String,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct MonitorEvent {
+    pub group_key: String,
+    pub prev_state: String,
+    pub new_state: String,
+    pub value: Option<f64>,
+    pub threshold: Option<f64>,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreviewRequest<'a> {
+    #[serde(rename = "type")]
+    pub monitor_type: &'a str,
+    pub query_config: &'a serde_json::Value,
+    pub eval_window_secs: i64,
+    pub lookback_secs: i64,
+    pub group_by: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub critical: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub critical_recovery: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning_recovery: Option<f64>,
+    pub comparator: &'a str,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PreviewResponse {
+    pub current_value: Option<f64>,
+    /// `[group_key, value]` pairs.
+    pub groups: Vec<(String, f64)>,
+    pub series: Vec<PreviewSeries>,
+    pub simulated_events: Vec<SimulatedEvent>,
+    pub bucket_secs: i64,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct PreviewSeries {
+    pub group_key: String,
+    pub points: Vec<PreviewPoint>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct PreviewPoint {
+    pub timestamp: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct SimulatedEvent {
+    pub timestamp: String,
+    pub group_key: String,
+    pub previous_state: String,
+    pub state: String,
+    pub value: f64,
+    pub threshold: Option<f64>,
+}
+
+// ── SLOs ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SlosResponse {
+    pub slos: Vec<Slo>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SloDetailResponse {
+    pub slo: Slo,
+    pub events: Vec<SloEvent>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct Slo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub slo_type: String,
+    pub indicator_type: String,
+    pub service_name: String,
+    pub metric_name: String,
+    pub window_type: String,
+    pub target_percentage: f64,
+    pub threshold_ms: Option<f64>,
+    pub state: String,
+    /// Fraction of budget left: 1.0 full, 0 or below exhausted.
+    pub error_budget_remaining: Option<f64>,
+    pub error_count: Option<f64>,
+    pub total_count: Option<f64>,
+    pub last_eval_at: Option<String>,
+    pub last_breached_at: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct SloEvent {
+    pub state: String,
+    pub error_count: f64,
+    pub total_count: f64,
+    pub error_budget_remaining: f64,
+    pub message: String,
+    pub created_at: String,
+}
+
+// ── Anomalies ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AnomalyEventsResponse {
+    pub events: Vec<AnomalyEvent>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct AnomalyEvent {
+    pub id: String,
+    pub rule_id: String,
+    pub rule_name: String,
+    /// "anomalous" opens an anomaly; a later "normal" for the same rule resolves it.
+    pub state: String,
+    pub metric: String,
+    pub value: f64,
+    pub expected: f64,
+    /// Distance from the expected value in standard deviations.
+    pub deviation: f64,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AnomalyRuleResponse {
+    pub rule: AnomalyRule,
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(default)]
+pub struct AnomalyRule {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub query: String,
+    pub service_name: String,
+    pub apm_metric: String,
+    pub sensitivity: f64,
+    pub state: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Correlations {
+    pub status_code: u16,
+    pub services: Vec<CorrelatedService>,
+    pub logs: Vec<CorrelatedLog>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct CorrelatedService {
+    pub name: String,
+    pub total: u64,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct CorrelatedLog {
+    pub timestamp: String,
+    pub service_name: String,
+    pub severity_text: String,
+    pub body: String,
+    pub trace_id: String,
+}
+
+// ── Dashboards ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct DashboardsResponse {
+    pub dashboards: Vec<Dashboard>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct Dashboard {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub visibility: String,
+    pub tags: serde_json::Value,
+    pub variables: serde_json::Value,
+    pub defaults: serde_json::Value,
+    pub updated_at: String,
+    pub widgets: Vec<Widget>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct Widget {
+    pub id: String,
+    pub title: String,
+    pub widget_type: String,
+    pub query_config: serde_json::Value,
+    pub display_config: serde_json::Value,
+}
+
 // ── Client helpers ────────────────────────────────────────────────────────
 
 impl RushClient {

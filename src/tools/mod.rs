@@ -1,8 +1,10 @@
 //! MCP tools, one module per toolset.
 
+pub mod alerting;
 pub mod analysis;
 pub mod changes;
 pub mod core;
+pub mod dashboards;
 pub mod saved_queries;
 
 use chrono::{TimeZone, Utc};
