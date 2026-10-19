@@ -9,6 +9,7 @@ pub enum Toolset {
     Dashboards,
     Changes,
     SavedQueries,
+    SreAgent,
 }
 
 impl Toolset {
@@ -19,6 +20,7 @@ impl Toolset {
         Toolset::Dashboards,
         Toolset::Changes,
         Toolset::SavedQueries,
+        Toolset::SreAgent,
     ];
 
     pub fn name(self) -> &'static str {
@@ -29,6 +31,7 @@ impl Toolset {
             Toolset::Dashboards => "dashboards",
             Toolset::Changes => "changes",
             Toolset::SavedQueries => "saved_queries",
+            Toolset::SreAgent => "sre_agent",
         }
     }
 
@@ -58,6 +61,11 @@ impl Toolset {
             }
             Toolset::Changes => "changes: deploy markers",
             Toolset::SavedQueries => "saved_queries: list and run saved Explore queries",
+            Toolset::SreAgent => {
+                "sre_agent: hand an investigation to the Rush SRE agent (start, follow up, read, list, \
+                 templates) and turn plain language into filters with parse_query. These spend the \
+                 tenant's LLM budget and need a key with agent access"
+            }
         }
     }
 
@@ -105,6 +113,14 @@ impl Toolset {
             ],
             Toolset::Changes => &["list_deploys"],
             Toolset::SavedQueries => &["list_saved_queries", "run_saved_query"],
+            Toolset::SreAgent => &[
+                "start_investigation",
+                "continue_investigation",
+                "get_investigation",
+                "list_investigations",
+                "list_investigation_templates",
+                "parse_query",
+            ],
         }
     }
 }

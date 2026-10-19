@@ -277,7 +277,7 @@ async fn prompts_render_with_arguments() {
     let rush = MockServer::start().await;
     let client = connect(&rush, &[]).await;
     let prompts = client.list_all_prompts().await.unwrap();
-    assert_eq!(prompts.len(), 4);
+    assert_eq!(prompts.len(), 5);
     let got = client
         .get_prompt(
             GetPromptRequestParams::new("triage_service").with_arguments(
@@ -398,6 +398,234 @@ async fn widget_data_runs_the_widget_query_with_variables() {
     assert_eq!(
         out["result"]["queries"][0]["query"],
         "service_name=checkout"
+    );
+    client.cancel().await.unwrap();
+}
+
+fn sse(events: &[Value]) -> String {
+    events
+        .iter()
+        .map(|e| format!("data: {e}\n\n"))
+        .collect::<Vec<_>>()
+        .join(": keep-alive\n\n")
+}
+
+#[tokio::test]
+async fn start_investigation_streams_the_agent_report() {
+    let rush = MockServer::start().await;
+    mock_whoami(&rush).await;
+    Mock::given(path("/api/v1/investigation-templates"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"templates": [
+            {"id": "alert_investigation", "name": "Investigate Alert", "description": "d", "prompt_modifier": "secret prompt", "auto_tools": []}
+        ]})))
+        .mount(&rush)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/investigate"))
+        .and(body_partial_json(json!({"question": "Why are checkout errors up?", "template_id": "alert_investigation"})))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(sse(&[
+            json!({"type": "session_created", "session_id": "s-42"}),
+            json!({"type": "tool_call", "name": "search_logs", "args": {"service": "checkout"}}),
+            json!({"type": "tool_result", "name": "search_logs", "data": "31 errors: pool timeout"}),
+            json!({"type": "summary", "text": "Connection pool exhausted after the 14:02 deploy.", "kind": "final"}),
+            json!({"type": "done", "rounds": 2, "tool_calls": 1, "prompt_tokens": 800, "completion_tokens": 90, "session_id": "s-42", "model": "m"}),
+        ])))
+        .expect(1)
+        .mount(&rush)
+        .await;
+    // Rush hasn't stored the report yet; the stream's report is used.
+    Mock::given(path("/api/v1/sessions/s-42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "session": {"id": "s-42", "title": "Why are checkout errors up?", "status": "active", "working_memory": "{}"},
+            "turns": [{"turn_index": 0, "role": "user", "content": "Why are checkout errors up?", "tool_calls": "[]", "report_kind": "", "created_at": "2026-10-18 14:00:00.000"}]
+        })))
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &[]).await;
+
+    let (is_error, out, text) = call(
+        &client,
+        "start_investigation",
+        json!({"question": "Why are checkout errors up?", "template": "alert_investigation", "last": "30m", "wait_seconds": 5}),
+    )
+    .await;
+    assert!(!is_error, "{text}");
+    let r = &out["result"];
+    assert_eq!(r["session_id"], "s-42");
+    assert_eq!(r["status"], "completed");
+    assert_eq!(
+        r["report"],
+        "Connection pool exhausted after the 14:02 deploy."
+    );
+    assert_eq!(
+        r["steps"][0],
+        json!({"tool": "search_logs", "input": "service=checkout", "result": "31 errors: pool timeout"})
+    );
+    assert_eq!(
+        out["links"]["investigation"],
+        "https://rush.example.com/sre-agent/s-42?tenant=prod"
+    );
+
+    // Rush picks the tenant and tool scopes; the server never sends them.
+    let requests = rush.received_requests().await.unwrap();
+    let body: Value = requests
+        .iter()
+        .find(|r| r.url.path() == "/api/v1/investigate")
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .unwrap();
+    assert!(
+        body.get("tenant_id").is_none() && body.get("scopes").is_none(),
+        "{body}"
+    );
+    assert_eq!(body["window"]["selection_reason"], "user_provided_range");
+
+    let (is_error, _, text) = call(
+        &client,
+        "start_investigation",
+        json!({"question": "x", "template": "nope"}),
+    )
+    .await;
+    assert!(is_error);
+    assert!(
+        text.contains("known templates: alert_investigation"),
+        "{text}"
+    );
+
+    let (is_error, out, _) = call(&client, "list_investigation_templates", json!({})).await;
+    assert!(!is_error);
+    assert!(
+        out["result"]["templates"][0]
+            .get("prompt_modifier")
+            .is_none()
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_investigation_reads_the_stored_session() {
+    let rush = MockServer::start().await;
+    mock_whoami(&rush).await;
+    Mock::given(path("/api/v1/sessions/s-7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "session": {"id": "s-7", "title": "Latency on /pay", "status": "active", "template_id": "", "prompt_tokens": 1200, "completion_tokens": 300, "llm_model": "m"},
+            "turns": [
+                {"turn_index": 0, "role": "user", "content": "Why is /pay slow?", "tool_calls": "[]", "report_kind": "", "created_at": "2026-10-18 14:00:00"},
+                {"turn_index": 1, "role": "assistant", "content": "Which region do you mean?", "report_kind": "question", "created_at": "2026-10-18 14:01:00",
+                 "tool_calls": "[{\"type\":\"tool_call\",\"name\":\"get_service\",\"args\":{\"name\":\"pay\"}},{\"type\":\"tool_result\",\"name\":\"get_service\",\"data\":\"p95 2.1s\"}]"}
+            ]
+        })))
+        .mount(&rush)
+        .await;
+    Mock::given(path("/api/v1/sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sessions": [
+            {"id": "s-7", "title": "Latency on /pay", "status": "active", "updated_at": "2026-10-18 14:01:00", "prompt_tokens": 1200, "completion_tokens": 300}
+        ]})))
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &[]).await;
+
+    let (is_error, out, text) = call(
+        &client,
+        "get_investigation",
+        json!({"session_id": "https://rush.example.com/sre-agent/s-7"}),
+    )
+    .await;
+    assert!(!is_error, "{text}");
+    assert_eq!(out["result"]["status"], "needs_answer");
+    assert_eq!(out["result"]["report"], "Which region do you mean?");
+    assert_eq!(out["result"]["steps"][0]["result"], "p95 2.1s");
+    assert_eq!(out["result"]["usage"]["completion_tokens"], 300);
+    assert!(
+        out["summary"]
+            .as_str()
+            .unwrap()
+            .contains("continue_investigation")
+    );
+
+    let (is_error, out, _) = call(&client, "list_investigations", json!({"limit": 5})).await;
+    assert!(!is_error);
+    assert_eq!(out["result"]["investigations"][0]["tokens"], 1500);
+    assert_eq!(
+        out["result"]["investigations"][0]["link"],
+        "https://rush.example.com/sre-agent/s-7?tenant=prod"
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn keys_without_agent_access_get_setup_help() {
+    let rush = MockServer::start().await;
+    Mock::given(path("/api/v1/investigate"))
+        .respond_with(
+            ResponseTemplate::new(403).set_body_string("API key does not have agent access"),
+        )
+        .mount(&rush)
+        .await;
+    Mock::given(path("/api/v1/parse-query"))
+        .respond_with(ResponseTemplate::new(501).set_body_string("LLM disabled"))
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &[]).await;
+    let (is_error, _, text) =
+        call(&client, "start_investigation", json!({"question": "why?"})).await;
+    assert!(is_error);
+    assert!(text.contains("does not have agent access"), "{text}");
+    assert!(
+        text.contains("Allow SRE agent and natural-language search"),
+        "{text}"
+    );
+
+    let (is_error, _, text) = call(
+        &client,
+        "parse_query",
+        json!({"query": "errors in checkout"}),
+    )
+    .await;
+    assert!(is_error);
+    assert!(text.contains("turned off"), "{text}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn parse_query_returns_filters_for_the_signal_and_a_link() {
+    let rush = MockServer::start().await;
+    mock_whoami(&rush).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/parse-query"))
+        .and(body_partial_json(
+            json!({"query": "500 errors from checkout"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "filters": [
+                {"field": "service_name", "op": "=", "value": "checkout"},
+                {"field": "status_code", "op": ">=", "value": 500},
+                {"field": "level", "op": "=", "value": "warn"}
+            ],
+            "search": "",
+            "confidence": 0.92
+        })))
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &[]).await;
+    let (is_error, out, text) = call(
+        &client,
+        "parse_query",
+        json!({"query": "500 errors from checkout", "signal": "spans"}),
+    )
+    .await;
+    assert!(!is_error, "{text}");
+    assert_eq!(
+        out["result"]["filters"],
+        json!([
+            {"field": "service_name", "op": "=", "value": "checkout"},
+            {"field": "http_status_code", "op": ">=", "value": 500}
+        ])
+    );
+    assert_eq!(out["result"]["dropped"].as_array().unwrap().len(), 1);
+    let link = out["links"]["explore"].as_str().unwrap();
+    assert!(
+        link.contains("mode=spans") && link.contains("http_status_code%3E%3D500"),
+        "{link}"
     );
     client.cancel().await.unwrap();
 }

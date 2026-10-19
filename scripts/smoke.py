@@ -112,6 +112,18 @@ if dash and dash["result"]["dashboards"]:
     if summ and summ["result"]["widgets"]:
         for w in summ["result"]["widgets"][:4]:
             call("get_widget_data", {"dashboard": did, "widget": w["id"]})
+# SRE agent tools need a key with agent access (RUSH_KEY_AGENT=1). Starting an
+# investigation spends LLM budget, so it only runs with RUSH_SMOKE_INVESTIGATE=1.
+no_agent = os.environ.get("RUSH_KEY_AGENT") != "1"
+call("list_investigation_templates", {}, expect_error=no_agent)
+inv = call("list_investigations", {"limit": 5}, expect_error=no_agent)
+call("parse_query", {"query": "errors from " + (service or "checkout") + " in the last hour"}, expect_error=no_agent)
+if inv and inv["result"]["investigations"]:
+    call("get_investigation", {"session_id": inv["result"]["investigations"][0]["session_id"]})
+if os.environ.get("RUSH_SMOKE_INVESTIGATE") == "1":
+    started = call("start_investigation", {"question": f"Is {service or 'anything'} unhealthy right now? Keep it brief.", "last": "30m", "wait_seconds": 45})
+    if started:
+        call("get_investigation", {"session_id": started["result"]["session_id"], "wait_seconds": 120})
 prompts = send("prompts/list", {}).get("result", {}).get("prompts", [])
 print(f"  prompts: {', '.join(p['name'] for p in prompts)}")
 if prompts:

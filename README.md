@@ -4,11 +4,12 @@
 server for [Rush Observability](https://github.com/RushObservability). It lets
 AI assistants such as Claude Code, Claude Desktop, Cursor and VS Code search
 logs and APM spans, read traces, run PromQL, check service health, compare
-time windows, read monitors, SLOs, anomalies and dashboards, and run saved
-queries, and link every answer back to the Rush UI.
+time windows, read monitors, SLOs, anomalies and dashboards, run saved
+queries, and hand deeper investigations to the Rush SRE agent, and link every
+answer back to the Rush UI.
 
-> **Status:** read-only. Handing an investigation to the Rush SRE agent and
-> write tools (muting monitors, recording deploys) come in later releases.
+> **Status:** read-only, apart from starting SRE agent investigations (opt-in).
+> Write tools (muting monitors, recording deploys) come in a later release.
 
 ## How it works
 
@@ -53,6 +54,12 @@ role:
 - **Viewer** (default) is enough for every tool except `preview_monitor`.
 - **Write** is needed for `preview_monitor`, because Rush only lets
   writers simulate monitors, and for write tools in later releases.
+
+For the `sre_agent` toolset, also turn on **Allow SRE agent and
+natural-language search** when creating the key. It lets the key start and
+read SRE agent investigations and use `parse_query`, all of which spend the
+tenant's LLM budget. Investigations started with a key can use the agent's
+telemetry tools only, never source code or cluster access.
 
 A key is scoped to the tenant it was created in, so the server only ever sees
 that tenant's data. Rush records the key, and the tool that used it, with each
@@ -146,11 +153,32 @@ docker run --rm -i -e RUSH_URL=https://rush.example.com -e RUSH_API_KEY=rush_qry
 | `list_deploys` | changes | List deploy markers (service, version, commit, environment, who and when), newest first. Defaults to the last 7 days. Use to line up changes with errors or latency. |
 | `list_saved_queries` | saved_queries | List saved Explore queries visible to this key: shared with the tenant, with its groups, or its own. Each has a description of why it is useful. |
 | `run_saved_query` | saved_queries | Run a saved Explore query by ID or Rush link and return the same summary as search_logs or search_spans, plus the saved query's name and description. |
+| `start_investigation` | sre_agent | Hand an investigation to the Rush SRE agent, which queries logs, traces, metrics, deploys and alerts on its own and writes a report. Give a question, or an anomaly event ID, optionally a template and an incident window. Waits up to wait_seconds (default 30) and returns the report if it finished, otherwise the evidence so far and a session ID for get_investigation. Spends the tenant's LLM budget; needs a key with agent access. |
+| `continue_investigation` | sre_agent | Ask the Rush SRE agent a follow-up in an existing investigation, or answer its question. The agent keeps the session's evidence and memory. Waits up to wait_seconds (default 30) like start_investigation. Spends the tenant's LLM budget. |
+| `get_investigation` | sre_agent | Read an SRE agent investigation: status, the latest question and report, the evidence trail (each tool the agent called with a one-line result) and token use. Set wait_seconds (max 120) to wait for a running investigation to finish. |
+| `list_investigations` | sre_agent | List recent SRE agent investigations in this tenant, most recently updated first, with title, status, template, token use and a Rush link. |
+| `list_investigation_templates` | sre_agent | List the SRE agent's investigation templates (alert investigation, postmortem, capacity review, deploy review, security review) with what each does. Pass a template's id to start_investigation. |
+| `parse_query` | sre_agent | Turn a plain-language request ("500 errors from checkout in production") into Rush filters and free-text search for logs or spans, with an Explore link. Pass the result to search_logs, search_spans or aggregate. Uses the Rush LLM gateway; needs a key with agent access. |
 <!-- tools:end -->
 
 Toolsets are enabled with `--toolsets` (default
-`core,analysis,alerting,changes,saved_queries`; `dashboards` is opt-in; or
-`all`). Narrow them further with `--enable-tools` and `--disable-tools`.
+`core,analysis,alerting,changes,saved_queries`; `dashboards` and `sre_agent`
+are opt-in; or `all`). Narrow them further with `--enable-tools` and
+`--disable-tools`.
+
+### SRE agent investigations
+
+`start_investigation` hands a question (or an anomaly event) to the Rush SRE
+agent, which runs its own queries and writes a report. The tool waits up to
+`wait_seconds` (default 30, max 45). If the agent hasn't finished by then, it
+returns the evidence so far and a session ID, and the run carries on. Read it
+with `get_investigation`, which can wait up to 120 seconds, and ask follow-ups
+with `continue_investigation`. Every result links to the session in Rush.
+
+The agent cancels a run when its event stream closes, so this server keeps
+reading the stream in the background after the tool returns. Stopping the
+server stops the runs it is following. Rush stores every session, so
+`get_investigation` and `list_investigations` work from any server or client.
 
 ## Prompts and resources
 
@@ -163,6 +191,7 @@ menu. Each appears only when the toolsets it uses are enabled.
 | `investigate_alert` | `alert` | Works through a firing monitor or anomaly: re-runs the signal, compares before and after, checks deploys |
 | `deploy_review` | `service`, `version` | Compares errors and latency before and after a deploy |
 | `slow_endpoint` | `service`, `endpoint`, `last` | Finds what slow requests to one endpoint have in common |
+| `postmortem_draft` | `incident` | Drafts a postmortem with the SRE agent's postmortem template |
 
 Two resources can be attached as context: `rush://context` (same as
 `get_context`) and `rush://services` (same as `list_services` for the last
@@ -210,7 +239,9 @@ are rejected.
 
 ## Security
 
-- Read-only: this release has no tools that change anything in Rush.
+- Read-only: no tool changes anything in Rush. The exceptions are
+  `start_investigation` and `continue_investigation` (opt-in `sre_agent`
+  toolset), which record an investigation session and spend LLM budget.
 - Log bodies, span names and attribute values come from monitored systems.
   The server tells clients to treat them as untrusted data, never as
   instructions.
@@ -226,7 +257,9 @@ make ci     # formatting, Clippy, tests, build
 
 `scripts/smoke.py` drives every tool, prompt and resource against a real Rush
 deployment over stdio and prints each result's summary, size and timing. Set
-`RUSH_KEY_ROLE=write` when the key can preview monitors:
+`RUSH_KEY_ROLE=write` when the key can preview monitors, `RUSH_KEY_AGENT=1`
+when it has agent access, and `RUSH_SMOKE_INVESTIGATE=1` to also start a
+short SRE agent investigation (this spends LLM budget):
 
 ```bash
 RUSH_URL=https://rush.example.com RUSH_API_KEY=rush_qry_… python3 scripts/smoke.py target/release/rush-mcp

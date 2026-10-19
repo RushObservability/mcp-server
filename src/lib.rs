@@ -5,6 +5,7 @@ pub mod client;
 pub mod config;
 pub mod envelope;
 pub mod http;
+pub mod investigations;
 pub mod links;
 pub mod metrics;
 pub mod prompts;

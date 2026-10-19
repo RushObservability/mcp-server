@@ -36,6 +36,13 @@ pub struct DeployArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct IncidentArgs {
+    /// An SRE agent session ID or link, or a short description of the incident
+    /// (service, what happened, roughly when).
+    pub incident: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct EndpointArgs {
     /// Service name.
     pub service: String,
@@ -170,6 +177,26 @@ impl RushMcp {
                 ),
             ],
             CLOSE,
+        )
+    }
+
+    #[prompt(
+        name = "postmortem_draft",
+        description = "Draft a postmortem with the Rush SRE agent's postmortem template."
+    )]
+    async fn postmortem_draft(
+        &self,
+        Parameters(a): Parameters<IncidentArgs>,
+    ) -> Vec<PromptMessage> {
+        steps(
+            format!("Draft a postmortem for this incident: `{}`.", a.incident),
+            &[
+                "If it is an SRE agent session ID or link, call get_investigation and use its report and steps as the starting evidence.",
+                "Call start_investigation with template=\"postmortem\", a question asking for a postmortem of the incident, the evidence so far as context, and from/to covering the incident if you know it.",
+                "If it is still running, call get_investigation with wait_seconds=120 until it finishes; answer any question it asks with continue_investigation.",
+                "Present the draft: summary, impact, timeline (UTC), root cause and contributing factors, detection and response, and follow-up actions.",
+            ],
+            "Mark which statements come from the agent's evidence and which are open questions, and include the investigation link so I can review it in Rush.",
         )
     }
 }

@@ -145,6 +145,14 @@ impl Links {
         self.build(&format!("/anomaly/rules/{}", urlencode_path(rule_id)), &[])
     }
 
+    pub fn sre_agent(&self) -> String {
+        self.build("/sre-agent", &[])
+    }
+
+    pub fn sre_session(&self, id: &str) -> String {
+        self.build(&format!("/sre-agent/{}", urlencode_path(id)), &[])
+    }
+
     pub fn dashboards(&self) -> String {
         self.build("/dashboards", &[])
     }
