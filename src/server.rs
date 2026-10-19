@@ -458,7 +458,8 @@ mod tests {
     #[test]
     fn readme_tool_table_matches_the_code() {
         let table = tools_markdown(Arc::new(state(Toolset::ALL.to_vec())));
-        let readme = include_str!("../README.md");
+        // Windows checkouts may convert the README to CRLF line endings.
+        let readme = include_str!("../README.md").replace("\r\n", "\n");
         let start = readme
             .find("<!-- tools:start -->")
             .expect("README needs <!-- tools:start -->");
