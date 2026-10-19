@@ -1028,6 +1028,130 @@ impl RushClient {
     }
 }
 
+// ── SRE agent ─────────────────────────────────────────────────────────────
+
+/// Body of `POST /api/v1/investigate`. Rush sets the tenant and tool scopes
+/// from the credential, so they are never sent.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct InvestigateRequest {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub session_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub question: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub event_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub additional_context: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub template_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<InvestigationWindow>,
+}
+
+/// The incident window and the equal-length baseline before it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InvestigationWindow {
+    pub incident_start: String,
+    pub incident_end: String,
+    pub baseline_start: String,
+    pub baseline_end: String,
+    pub selection_reason: &'static str,
+    pub timezone: &'static str,
+}
+
+impl From<&Window> for InvestigationWindow {
+    fn from(w: &Window) -> Self {
+        let baseline = w.previous();
+        Self {
+            incident_start: w.from_rfc3339(),
+            incident_end: w.to_rfc3339(),
+            baseline_start: baseline.from_rfc3339(),
+            baseline_end: baseline.to_rfc3339(),
+            selection_reason: "user_provided_range",
+            timezone: "UTC",
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SessionsResponse {
+    pub sessions: Vec<InvestigationSession>,
+}
+
+/// An investigation session. Rush also returns the agent's working memory,
+/// which is not decoded.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct InvestigationSession {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub template_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub llm_model: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SessionDetail {
+    pub session: InvestigationSession,
+    pub turns: Vec<InvestigationTurn>,
+}
+
+/// One message in a session: the user's question or the agent's report.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct InvestigationTurn {
+    pub turn_index: i64,
+    /// `user` or `assistant`.
+    pub role: String,
+    pub content: String,
+    /// JSON array of the run's `tool_call` and `tool_result` events.
+    pub tool_calls: String,
+    /// Assistant turns: `final`, `preliminary` or `question`.
+    pub report_kind: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TemplatesResponse {
+    pub templates: Vec<InvestigationTemplate>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default)]
+pub struct InvestigationTemplate {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// Tools the agent runs first with this template.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub auto_tools: Vec<String>,
+}
+
+// ── Natural-language parsing ──────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ParsedQuery {
+    pub filters: Vec<ParsedFilter>,
+    pub search: String,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ParsedFilter {
+    pub field: String,
+    pub op: String,
+    pub value: serde_json::Value,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

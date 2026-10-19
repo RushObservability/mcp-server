@@ -129,6 +129,51 @@ impl RushClient {
             .await
     }
 
+    /// POST and return the response once its status is a success, so the
+    /// caller can read a long-lived body (the SRE agent's event stream).
+    /// `timeout` replaces the client's request timeout for this call.
+    pub async fn post_stream<B: Serialize>(
+        &self,
+        client_key: Option<&ClientKey>,
+        tool: &str,
+        path: &str,
+        body: &B,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, ApiError> {
+        let key = self.resolve_key(client_key)?;
+        let req = self
+            .request(Method::POST, &key, tool, path)?
+            .timeout(timeout)
+            .json(body);
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(self.base.to_string(), network_message(&e)))?;
+        if resp.status().is_success() {
+            return Ok(resp);
+        }
+        Err(error_from(resp, &key, path).await)
+    }
+
+    fn request(
+        &self,
+        method: Method,
+        key: &str,
+        tool: &str,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder, ApiError> {
+        let url = self
+            .base
+            .join(path.trim_start_matches('/'))
+            .map_err(|e| ApiError::Config(format!("bad API path {path}: {e}")))?;
+        Ok(self
+            .http
+            .request(method, url)
+            .bearer_auth(key)
+            .header("X-Rush-Client", concat!("mcp/", env!("CARGO_PKG_VERSION")))
+            .header("X-Rush-MCP-Tool", tool))
+    }
+
     async fn send<B: Serialize, T: DeserializeOwned>(
         &self,
         method: Method,
@@ -139,16 +184,7 @@ impl RushClient {
         body: Option<&B>,
     ) -> Result<T, ApiError> {
         let key = self.resolve_key(client_key)?;
-        let url = self
-            .base
-            .join(path.trim_start_matches('/'))
-            .map_err(|e| ApiError::Config(format!("bad API path {path}: {e}")))?;
-        let mut req = self
-            .http
-            .request(method, url)
-            .bearer_auth(&key)
-            .header("X-Rush-Client", concat!("mcp/", env!("CARGO_PKG_VERSION")))
-            .header("X-Rush-MCP-Tool", tool);
+        let mut req = self.request(method, &key, tool, path)?;
         if !query.is_empty() {
             req = req.query(query);
         }
@@ -176,35 +212,39 @@ impl RushClient {
             return serde_json::from_slice(&bytes)
                 .map_err(|e| ApiError::Decode(format!("{path}: {e}")));
         }
-        let retry_after = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok());
-        let text = clip(resp.text().await.unwrap_or_default().trim(), 500);
-        Err(match status {
-            StatusCode::BAD_REQUEST
-            | StatusCode::UNPROCESSABLE_ENTITY
-            | StatusCode::PAYLOAD_TOO_LARGE => ApiError::BadRequest(text),
-            StatusCode::UNAUTHORIZED => {
-                ApiError::Unauthorized(Some(key.chars().take(12).collect()))
-            }
-            StatusCode::FORBIDDEN => ApiError::Forbidden(text),
-            StatusCode::NOT_FOUND => ApiError::NotFound(if text.is_empty() {
-                path.to_string()
-            } else {
-                text
-            }),
-            StatusCode::TOO_MANY_REQUESTS => ApiError::RateLimited(retry_after),
-            StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-            | StatusCode::BAD_GATEWAY => ApiError::Unavailable(if text.is_empty() {
+        Err(error_from(resp, &key, path).await)
+    }
+}
+
+/// Map a failed response to an error the model can act on.
+async fn error_from(resp: reqwest::Response, key: &str, path: &str) -> ApiError {
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let text = clip(resp.text().await.unwrap_or_default().trim(), 500);
+    match status {
+        StatusCode::BAD_REQUEST
+        | StatusCode::UNPROCESSABLE_ENTITY
+        | StatusCode::PAYLOAD_TOO_LARGE => ApiError::BadRequest(text),
+        StatusCode::UNAUTHORIZED => ApiError::Unauthorized(Some(key.chars().take(12).collect())),
+        StatusCode::FORBIDDEN => ApiError::Forbidden(text),
+        StatusCode::NOT_FOUND => ApiError::NotFound(if text.is_empty() {
+            path.to_string()
+        } else {
+            text
+        }),
+        StatusCode::TOO_MANY_REQUESTS => ApiError::RateLimited(retry_after),
+        StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT | StatusCode::BAD_GATEWAY => {
+            ApiError::Unavailable(if text.is_empty() {
                 status.to_string()
             } else {
                 text
-            }),
-            other => ApiError::Upstream(other.as_u16(), text),
-        })
+            })
+        }
+        other => ApiError::Upstream(other.as_u16(), text),
     }
 }
 

@@ -6,6 +6,7 @@ pub mod changes;
 pub mod core;
 pub mod dashboards;
 pub mod saved_queries;
+pub mod sre_agent;
 
 use chrono::{TimeZone, Utc};
 use schemars::JsonSchema;
