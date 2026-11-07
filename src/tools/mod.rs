@@ -46,9 +46,6 @@ impl QueryArgs {
     pub fn resolve(&self) -> Result<Query, ToolError> {
         let window = self.time.resolve()?;
         let mut filters = self.filters.clone();
-        if filters.len() > 30 {
-            return Err(ToolError::Input("at most 30 filters are allowed".into()));
-        }
         for f in &filters {
             let field = f.field.trim();
             if field.is_empty() || field.len() > 128 || field.chars().any(char::is_control) {
@@ -66,18 +63,20 @@ impl QueryArgs {
         {
             filters.push(Filter::eq("service_name", service));
         }
+        if filters.len() > 30 {
+            return Err(ToolError::Input(
+                "at most 30 filters are allowed, including service".into(),
+            ));
+        }
         let search = self
             .search
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        if search
-            .as_ref()
-            .is_some_and(|s| s.chars().count() > MAX_SEARCH_CHARS)
-        {
+        if search.as_ref().is_some_and(|s| s.len() > MAX_SEARCH_CHARS) {
             return Err(ToolError::Input(format!(
-                "search must be at most {MAX_SEARCH_CHARS} characters"
+                "search must be at most {MAX_SEARCH_CHARS} UTF-8 bytes"
             )));
         }
         Ok(Query {

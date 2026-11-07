@@ -9,6 +9,7 @@ pub mod investigations;
 pub mod links;
 pub mod metrics;
 pub mod prompts;
+mod query_contract;
 pub mod server;
 pub mod time;
 pub mod tools;

@@ -184,11 +184,39 @@ impl RushClient {
         body: Option<&B>,
     ) -> Result<T, ApiError> {
         let key = self.resolve_key(client_key)?;
-        let mut req = self.request(method, &key, tool, path)?;
-        if !query.is_empty() {
+        let value = body
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| ApiError::Decode(e.to_string()))?;
+        let unified = if method == Method::POST {
+            value
+                .as_ref()
+                .and_then(|v| crate::query_contract::adapt(path, v))
+        } else if method == Method::GET {
+            crate::query_contract::prom_request(path, query)
+        } else {
+            None
+        };
+        let mut req = self.request(
+            if unified.is_some() {
+                Method::POST
+            } else {
+                method
+            },
+            &key,
+            tool,
+            if unified.is_some() {
+                crate::query_contract::ENDPOINT
+            } else {
+                path
+            },
+        )?;
+        if !query.is_empty() && unified.is_none() {
             req = req.query(query);
         }
-        if let Some(body) = body {
+        if let Some(body) = unified.as_ref() {
+            req = req.json(body);
+        } else if let Some(body) = body {
             req = req.json(body);
         }
         let started = std::time::Instant::now();
@@ -209,8 +237,12 @@ impl RushClient {
                 .bytes()
                 .await
                 .map_err(|e| ApiError::Network(self.base.to_string(), e.to_string()))?;
-            return serde_json::from_slice(&bytes)
-                .map_err(|e| ApiError::Decode(format!("{path}: {e}")));
+            return (if let Some(request) = unified {
+                crate::query_contract::decode(&bytes, &request)
+            } else {
+                serde_json::from_slice(&bytes)
+            })
+            .map_err(|e| ApiError::Decode(format!("{path}: {e}")));
         }
         Err(error_from(resp, &key, path).await)
     }
