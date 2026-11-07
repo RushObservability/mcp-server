@@ -896,6 +896,44 @@ pub struct SloEvent {
 
 // ── Anomalies ─────────────────────────────────────────────────────────────
 
+/// `GET /api/v1/insights`: firing anomalies, repeated log templates, health score.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct InsightsResponse {
+    pub generated_at: String,
+    pub window_minutes: u64,
+    pub health_score: u8,
+    pub summary: String,
+    pub anomalies: Vec<InsightAnomaly>,
+    pub log_patterns: Vec<InsightLogPattern>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct InsightAnomaly {
+    pub rule_id: String,
+    pub name: String,
+    pub source: String,
+    pub service: String,
+    pub metric: String,
+    pub value: f64,
+    pub expected: f64,
+    /// Standard deviations from the baseline when the rule fired.
+    pub deviation: f64,
+    pub since: String,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct InsightLogPattern {
+    pub service: String,
+    pub severity: String,
+    pub template: String,
+    pub example: String,
+    pub count: u64,
+    pub last_seen: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct AnomalyEventsResponse {
