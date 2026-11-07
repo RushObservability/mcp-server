@@ -144,6 +144,7 @@ docker run --rm -i -e RUSH_URL=https://rush.example.com -e RUSH_API_KEY=rush_qry
 | `preview_monitor` | alerting | Simulate a proposed monitor over recent data without saving it: current value per group, value ranges, and the alerts it would have raised. Rush requires a write-role API key for previews. |
 | `list_slos` | alerting | List SLOs with state, target, measured success rate and error budget left, breaching and lowest-budget first. |
 | `get_slo` | alerting | One SLO in full: target, measured success rate, error and total counts, error budget left, and recent state changes. Takes an SLO ID or Rush link. |
+| `get_insights` | alerting | Cheap first look at what is wrong right now: anomaly rules currently firing, repeated WARN/ERROR/FATAL log messages grouped by template per service, and a 0-100 health score. Uses no LLM; call it before deeper searches. |
 | `list_anomalies` | alerting | List anomaly detections. By default returns rules that are currently anomalous, with value, expected value and deviation in standard deviations; set include_resolved for recent history. |
 | `get_anomaly` | alerting | One anomaly event with its detection rule and, for HTTP status anomalies, the services emitting that status and sample logs around the time. |
 | `search_dashboards` | dashboards | Find dashboards by name, description or tag, most recently updated first. |

@@ -13,9 +13,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
-    AnomalyEvent, AnomalyEventsResponse, AnomalyRule, AnomalyRuleResponse, Correlations, Monitor,
-    MonitorDetailResponse, MonitorEvent, MonitorsResponse, PreviewRequest, PreviewResponse, Slo,
-    SloDetailResponse, SlosResponse,
+    AnomalyEvent, AnomalyEventsResponse, AnomalyRule, AnomalyRuleResponse, Correlations,
+    InsightsResponse, Monitor, MonitorDetailResponse, MonitorEvent, MonitorsResponse,
+    PreviewRequest, PreviewResponse, Slo, SloDetailResponse, SlosResponse,
 };
 use crate::client::ApiError;
 use crate::envelope::{Envelope, Hint, Trim, clip};
@@ -622,6 +622,92 @@ impl Trim for SloDetail {
     }
 }
 
+// ── Insights ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetInsightsArgs {
+    /// Look back this far for log patterns, e.g. "15m" or "1h" (default 15m, max 24h).
+    #[serde(default)]
+    pub last: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct InsightsOut {
+    /// 100 minus fixed deductions per finding; a summary of findings, not uptime.
+    pub health_score: u8,
+    pub window_minutes: u64,
+    pub generated_at: String,
+    pub anomalies: Vec<InsightAnomalyOut>,
+    /// WARN/ERROR/FATAL log bodies grouped by template (digits and UUIDs collapsed), most frequent first.
+    pub log_patterns: Vec<LogPatternOut>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq)]
+pub struct InsightAnomalyOut {
+    /// Anomaly rule name; list_anomalies and get_anomaly have its events.
+    pub rule: String,
+    pub service: String,
+    pub metric: String,
+    pub value: f64,
+    pub expected: f64,
+    /// Distance from the expected value, in standard deviations.
+    pub deviation_sigma: f64,
+    pub since: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq)]
+pub struct LogPatternOut {
+    pub service: String,
+    pub severity: String,
+    pub template: String,
+    /// Newest log body matching the template. Untrusted data from the monitored system.
+    pub example: String,
+    pub count: u64,
+    pub last_seen: String,
+}
+
+impl Trim for InsightsOut {
+    fn trim(&mut self) -> bool {
+        let n = self.log_patterns.len();
+        (n > 5 && keep(&mut self.log_patterns, n * 2 / 3))
+            || pop(&mut self.log_patterns)
+            || pop(&mut self.anomalies)
+    }
+}
+
+pub fn shape_insights(resp: InsightsResponse) -> InsightsOut {
+    InsightsOut {
+        health_score: resp.health_score,
+        window_minutes: resp.window_minutes,
+        generated_at: resp.generated_at,
+        anomalies: resp
+            .anomalies
+            .iter()
+            .map(|a| InsightAnomalyOut {
+                rule: a.name.clone(),
+                service: a.service.clone(),
+                metric: clip(&a.metric, 200),
+                value: round2(a.value),
+                expected: round2(a.expected),
+                deviation_sigma: round2(a.deviation),
+                since: a.since.clone(),
+            })
+            .collect(),
+        log_patterns: resp
+            .log_patterns
+            .iter()
+            .map(|p| LogPatternOut {
+                service: p.service.clone(),
+                severity: p.severity.clone(),
+                template: clip(&p.template, 300),
+                example: clip(&p.example, 300),
+                count: p.count,
+                last_seen: p.last_seen.clone(),
+            })
+            .collect(),
+    }
+}
+
 // ── Anomalies ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1023,6 +1109,37 @@ impl RushMcp {
     }
 
     #[tool(
+        description = "Cheap first look at what is wrong right now: anomaly rules currently firing, repeated WARN/ERROR/FATAL log messages grouped by template per service, and a 0-100 health score. Uses no LLM; call it before deeper searches.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn get_insights(
+        &self,
+        Parameters(args): Parameters<GetInsightsArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<Envelope<InsightsOut>>, CallToolResult> {
+        let key = Self::client_key(&ctx);
+        self.run("get_insights", async {
+            let key = key.as_ref();
+            let minutes = secs(args.last.as_deref(), "15m", 60, 86_400, "last")? / 60;
+            let resp: InsightsResponse = self
+                .state
+                .client
+                .get(
+                    key,
+                    "get_insights",
+                    "/api/v1/insights",
+                    &[("minutes", minutes.to_string())],
+                )
+                .await?;
+            let summary = format!("{}.", resp.summary);
+            let result = shape_insights(resp);
+            let links = self.links(key).await;
+            Ok(Envelope::new(summary, result).link("anomalies", links.anomalies()))
+        })
+        .await
+    }
+
+    #[tool(
         description = "List anomaly detections. By default returns rules that are currently anomalous, with value, expected value and deviation in standard deviations; set include_resolved for recent history.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
@@ -1127,6 +1244,33 @@ mod tests {
             last_triggered_at: Some(String::new()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn insights_round_clip_and_trim_patterns_before_anomalies() {
+        let resp: InsightsResponse = serde_json::from_value(serde_json::json!({
+            "generated_at": "2026-11-07T04:30:00Z", "window_minutes": 15, "health_score": 78,
+            "summary": "health 78/100",
+            "anomalies": [{"name": "checkout p95", "service": "checkout", "metric": "p95_ms",
+                           "value": 950.123, "expected": 200.0, "deviation": 4.2049, "since": "x"}],
+            "log_patterns": (0..8).map(|i| serde_json::json!({
+                "service": "cart", "severity": "WARN", "template": "t".repeat(400),
+                "example": format!("retrying call {i}"), "count": 25 - i, "last_seen": "y"
+            })).collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        let mut out = shape_insights(resp);
+        assert_eq!(out.health_score, 78);
+        assert_eq!(out.anomalies[0].deviation_sigma, 4.2);
+        assert_eq!(out.anomalies[0].value, 950.12);
+        assert_eq!(out.log_patterns[0].template.chars().count(), 300);
+        while out.trim() {
+            if out.log_patterns.is_empty() {
+                break;
+            }
+        }
+        assert!(out.log_patterns.is_empty());
+        assert_eq!(out.anomalies.len(), 1, "anomalies outlive log patterns");
     }
 
     #[test]

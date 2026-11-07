@@ -54,7 +54,8 @@ impl Toolset {
                  breakdown, log context and full log records"
             }
             Toolset::Alerting => {
-                "alerting: monitors (state, events, previews), SLOs (budget, burn) and anomaly events"
+                "alerting: insights (firing anomalies, repeated error logs, health score; a cheap first \
+                 look), monitors (state, events, previews), SLOs (budget, burn) and anomaly events"
             }
             Toolset::Dashboards => {
                 "dashboards: search dashboards, read their widgets, and run a widget's query"
@@ -102,6 +103,7 @@ impl Toolset {
                 "preview_monitor",
                 "list_slos",
                 "get_slo",
+                "get_insights",
                 "list_anomalies",
                 "get_anomaly",
             ],
