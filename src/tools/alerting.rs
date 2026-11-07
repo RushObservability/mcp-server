@@ -21,7 +21,7 @@ use crate::client::ApiError;
 use crate::envelope::{Envelope, Hint, Trim, clip};
 use crate::links::id_from;
 use crate::server::{RushMcp, ToolError};
-use crate::time::parse_duration;
+use crate::time::{TimeArgs, Window, parse_duration};
 use crate::tools::{keep, pop, round2};
 
 fn severity_rank(state: &str, enabled: bool) -> u8 {
@@ -626,9 +626,9 @@ impl Trim for SloDetail {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetInsightsArgs {
-    /// Look back this far for log patterns, e.g. "15m" or "1h" (default 15m, max 24h).
-    #[serde(default)]
-    pub last: Option<String>,
+    /// Default `last` is 15m here; the window can be at most 24h.
+    #[serde(flatten)]
+    pub time: TimeArgs,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -653,6 +653,8 @@ pub struct InsightAnomalyOut {
     /// Distance from the expected value, in standard deviations.
     pub deviation_sigma: f64,
     pub since: String,
+    /// False when the anomaly resolved before the window ended.
+    pub open_at_end: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq)]
@@ -675,6 +677,30 @@ impl Trim for InsightsOut {
     }
 }
 
+fn insights_window(time: &TimeArgs) -> Result<Window, ToolError> {
+    let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let mut time = time.clone();
+    if !set(&time.last) && !set(&time.from) {
+        time.last = Some("15m".into());
+    }
+    let window = time.resolve()?;
+    if window.duration() > chrono::Duration::hours(24) {
+        return Err(ToolError::Input(
+            "get_insights covers at most 24h; narrow the window".into(),
+        ));
+    }
+    Ok(window)
+}
+
+/// A window ending now asks for live rule state; any other window reads
+/// anomaly history between `from` and `to`.
+fn insights_query(window: &Window) -> Vec<(&'static str, String)> {
+    match window.relative_minutes {
+        Some(minutes) => vec![("minutes", minutes.to_string())],
+        None => vec![("from", window.from_rfc3339()), ("to", window.to_rfc3339())],
+    }
+}
+
 pub fn shape_insights(resp: InsightsResponse) -> InsightsOut {
     InsightsOut {
         health_score: resp.health_score,
@@ -691,6 +717,7 @@ pub fn shape_insights(resp: InsightsResponse) -> InsightsOut {
                 expected: round2(a.expected),
                 deviation_sigma: round2(a.deviation),
                 since: a.since.clone(),
+                open_at_end: a.open_at_end,
             })
             .collect(),
         log_patterns: resp
@@ -1109,7 +1136,7 @@ impl RushMcp {
     }
 
     #[tool(
-        description = "Cheap first look at what is wrong right now: anomaly rules currently firing, repeated WARN/ERROR/FATAL log messages grouped by template per service, and a 0-100 health score. Uses no LLM; call it before deeper searches.",
+        description = "Cheap first look at what is wrong: anomaly rules firing in the window, repeated WARN/ERROR/FATAL log messages grouped by template per service, and a 0-100 health score. Defaults to the last 15m (rules firing now); pass from/to for an earlier incident, up to 24h. Uses no LLM; call it before deeper searches.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn get_insights(
@@ -1120,7 +1147,7 @@ impl RushMcp {
         let key = Self::client_key(&ctx);
         self.run("get_insights", async {
             let key = key.as_ref();
-            let minutes = secs(args.last.as_deref(), "15m", 60, 86_400, "last")? / 60;
+            let window = insights_window(&args.time)?;
             let resp: InsightsResponse = self
                 .state
                 .client
@@ -1128,13 +1155,15 @@ impl RushMcp {
                     key,
                     "get_insights",
                     "/api/v1/insights",
-                    &[("minutes", minutes.to_string())],
+                    &insights_query(&window),
                 )
                 .await?;
             let summary = format!("{}.", resp.summary);
             let result = shape_insights(resp);
             let links = self.links(key).await;
-            Ok(Envelope::new(summary, result).link("anomalies", links.anomalies()))
+            Ok(Envelope::new(summary, result)
+                .window(&window)
+                .link("anomalies", links.anomalies()))
         })
         .await
     }
@@ -1247,6 +1276,36 @@ mod tests {
     }
 
     #[test]
+    fn insights_window_is_live_by_default_and_explicit_otherwise() {
+        let t = |last: Option<&str>, from: Option<&str>, to: Option<&str>| TimeArgs {
+            last: last.map(Into::into),
+            from: from.map(Into::into),
+            to: to.map(Into::into),
+        };
+        let q = |time: TimeArgs| insights_query(&insights_window(&time).unwrap());
+        assert_eq!(q(t(None, None, None)), vec![("minutes", "15".to_string())]);
+        assert_eq!(
+            q(t(Some("1h"), None, None)),
+            vec![("minutes", "60".to_string())]
+        );
+        assert_eq!(
+            q(t(
+                None,
+                Some("2026-11-07T10:00:00Z"),
+                Some("2026-11-07T11:00:00Z")
+            )),
+            vec![
+                ("from", "2026-11-07T10:00:00Z".to_string()),
+                ("to", "2026-11-07T11:00:00Z".to_string()),
+            ]
+        );
+        // A lookback ending in the past is a fixed window too.
+        let ended = q(t(Some("30m"), None, Some("2026-11-07T11:00:00Z")));
+        assert_eq!(ended[0], ("from", "2026-11-07T10:30:00Z".to_string()));
+        assert!(insights_window(&t(Some("2d"), None, None)).is_err());
+    }
+
+    #[test]
     fn insights_round_clip_and_trim_patterns_before_anomalies() {
         let resp: InsightsResponse = serde_json::from_value(serde_json::json!({
             "generated_at": "2026-11-07T04:30:00Z", "window_minutes": 15, "health_score": 78,
@@ -1260,6 +1319,10 @@ mod tests {
         }))
         .unwrap();
         let mut out = shape_insights(resp);
+        assert!(
+            out.anomalies[0].open_at_end,
+            "older servers only report open rules"
+        );
         assert_eq!(out.health_score, 78);
         assert_eq!(out.anomalies[0].deviation_sigma, 4.2);
         assert_eq!(out.anomalies[0].value, 950.12);

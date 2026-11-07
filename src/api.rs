@@ -901,6 +901,8 @@ pub struct SloEvent {
 #[serde(default)]
 pub struct InsightsResponse {
     pub generated_at: String,
+    pub from: String,
+    pub to: String,
     pub window_minutes: u64,
     pub health_score: u8,
     pub summary: String,
@@ -921,6 +923,14 @@ pub struct InsightAnomaly {
     /// Standard deviations from the baseline when the rule fired.
     pub deviation: f64,
     pub since: String,
+    /// Still anomalous at the end of the window. Absent from older servers,
+    /// which only report rules firing now.
+    #[serde(default = "yes")]
+    pub open_at_end: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
