@@ -16,6 +16,10 @@ use rush_mcp::client::{KeySource, RushClient};
 use rush_mcp::config::Config;
 use rush_mcp::server::{AppState, RushMcp};
 
+fn query_response(signal: &str, operation: &str, data: Value) -> Value {
+    json!({"version":"v1","signal":signal,"operation":operation,"data":data,"meta":{"partial":false,"warnings":[]}})
+}
+
 async fn connect(rush: &MockServer, extra: &[&str]) -> RunningService<RoleClient, ()> {
     let mut args = vec![
         "rush-mcp",
@@ -132,11 +136,11 @@ async fn search_logs_returns_a_summary_with_tenant_links() {
     let rush = MockServer::start().await;
     mock_whoami(&rush).await;
     Mock::given(method("POST"))
-        .and(path("/api/v1/explore/search"))
+        .and(path("/api/v1/query/execute"))
         .and(header("authorization", "Bearer rush_qry_test"))
         .and(header("x-rush-mcp-tool", "search_logs"))
         .and(body_partial_json(json!({"signal": "logs", "filters": [{"field": "service_name", "op": "=", "value": "checkout"}]})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        .respond_with(ResponseTemplate::new(200).set_body_json(query_response("logs", "explore", json!({
             "signal": "logs",
             "rows": [{"Timestamp": 1760796000000000000_i64, "ServiceName": "checkout", "SeverityText": "ERROR",
                       "Body": "payment provider timeout", "TimestampNs": "1760796000000000000", "BlockNumber": "1",
@@ -146,7 +150,7 @@ async fn search_logs_returns_a_summary_with_tenant_links() {
                         "facets": {"services": [{"key": "checkout", "count": 42}], "statuses": [{"key": "error", "count": 7}], "methods": []},
                         "groups": [], "interval_secs": 60},
             "errors": {}
-        })))
+        }))))
         .expect(1)
         .mount(&rush)
         .await;
@@ -183,7 +187,7 @@ async fn upstream_rejections_come_back_as_readable_tool_errors() {
         .respond_with(ResponseTemplate::new(404).set_body_string("trace not found"))
         .mount(&rush)
         .await;
-    Mock::given(path("/prom/api/v1/query_range"))
+    Mock::given(path("/api/v1/query/execute"))
         .respond_with(ResponseTemplate::new(400).set_body_string("PromQL error: unexpected token"))
         .mount(&rush)
         .await;
@@ -254,14 +258,18 @@ async fn results_respect_the_byte_budget() {
     let rows: Vec<Value> = (0..50)
         .map(|i| json!({"timestamp": 1760796000000000000_i64 + i, "service_name": "svc", "span_name": "x".repeat(300), "duration_ns": 1000, "trace_id": "t", "span_id": "s"}))
         .collect();
-    Mock::given(path("/api/v1/explore/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rows": rows, "count": {"value": 50, "kind": "exact"}, "summary": {"histogram": [], "facets": {}, "groups": []}})))
+    Mock::given(path("/api/v1/query/execute"))
+        .and(body_partial_json(json!({"operation":"explore"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(query_response("spans", "explore", json!({"rows": rows, "count": {"value": 50, "kind": "exact"}, "summary": {"histogram": [], "facets": {}, "groups": []}}))))
         .mount(&rush)
         .await;
-    Mock::given(path("/api/v1/query/timeseries"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"buckets": [], "grouped": false})),
-        )
+    Mock::given(path("/api/v1/query/execute"))
+        .and(body_partial_json(json!({"operation":"timeseries"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(query_response(
+            "spans",
+            "timeseries",
+            json!({"buckets": [], "grouped": false}),
+        )))
         .mount(&rush)
         .await;
     let client = connect(&rush, &["--max-result-bytes", "4096"]).await;
@@ -382,9 +390,9 @@ async fn widget_data_runs_the_widget_query_with_variables() {
         .mount(&rush)
         .await;
     Mock::given(method("POST"))
-        .and(path("/api/v1/query/group"))
-        .and(body_partial_json(json!({"group_by": ["http_path"], "filters": [{"field": "service_name", "op": "=", "value": "checkout"}]})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"groups": [{"http_path": "/pay", "count": 7}]})))
+        .and(path("/api/v1/query/execute"))
+        .and(body_partial_json(json!({"version":"v1","signal":"spans","operation":"group","options":{"group_by": ["http_path"]}, "filters": [{"field": "service_name", "op": "=", "value": "checkout"}]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(query_response("spans", "group", json!({"groups": [{"http_path": "/pay", "count": 7}]}))))
         .expect(1)
         .mount(&rush)
         .await;

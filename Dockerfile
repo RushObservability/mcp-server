@@ -3,6 +3,7 @@ FROM rust:1.88-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
+COPY contracts ./contracts
 RUN cargo build --locked --release && strip target/release/rush-mcp
 
 FROM gcr.io/distroless/cc-debian12:nonroot
