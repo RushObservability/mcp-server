@@ -2,8 +2,6 @@ name: Security and quality
 
 on:
   pull_request:
-  push:
-    branches: [main]
   schedule:
     # Weekly, so advisories published after a merge still surface.
     - cron: "31 9 * * 1"

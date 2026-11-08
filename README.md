@@ -44,7 +44,14 @@ cargo install --git https://github.com/RushObservability/mcp-server.git
 
 This installs the `rush-mcp` binary. Release archives for Linux, macOS and
 Windows, and a container image (`ghcr.io/rushobservability/mcp-server`), are
-published for each version tag.
+published for each version. Queries go through Rush's versioned query endpoint,
+`/api/v1/query/execute`, so the server needs `query-api` v0.1.11 or later.
+
+To release, bump `version` in `Cargo.toml` (and `Cargo.lock`, with
+`cargo update -p rush-mcp --offline`) in a pull request. Merging it to `main`
+tags `v<version>` and publishes the archives, checksums and image. A
+`Cargo.toml` change that keeps a released version publishes nothing. To retry a
+failed release, run `gh workflow run release.yml --ref main`.
 
 ## Get an API key
 
