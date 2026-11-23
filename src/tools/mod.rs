@@ -5,6 +5,7 @@ pub mod analysis;
 pub mod changes;
 pub mod core;
 pub mod dashboards;
+pub mod notebooks;
 pub mod saved_queries;
 pub mod sre_agent;
 
