@@ -116,6 +116,98 @@ async fn initialize_advertises_tools_and_instructions() {
 }
 
 #[tokio::test]
+async fn notebook_tools_create_append_and_read_with_the_callers_key() {
+    let rush = MockServer::start().await;
+    mock_whoami(&rush).await;
+    let id = "00000000-0000-0000-0000-000000000001";
+    let cell_id = "00000000-0000-0000-0000-000000000002";
+    let note = json!({"id":id,"name":"Checkout incident","cells":[]});
+    Mock::given(method("POST"))
+        .and(path("/api/v1/notebooks"))
+        .and(header("authorization", "Bearer rush_qry_test"))
+        .and(header("x-rush-mcp-tool", "create_notebook"))
+        .and(body_partial_json(
+            json!({"name":"Checkout incident","visibility":"tenant"}),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(&note))
+        .expect(1)
+        .mount(&rush)
+        .await;
+    Mock::given(method("POST")).and(path(format!("/api/v1/notebooks/{id}/cells")))
+        .and(header("authorization","Bearer rush_qry_test"))
+        .and(body_partial_json(json!({"cell_type":"note","body":"Confirmed: provider timeouts.","time":{"mode":"inherit"}})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":cell_id,"cell_type":"note","position":1000,"title":"Findings"}))).expect(1).mount(&rush).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/notebooks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"notebooks":[note.clone()]})))
+        .mount(&rush)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/notebooks/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&note))
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &["--toolsets", "notebooks"]).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let mutation = tools.iter().find(|t| t.name == "create_notebook").unwrap();
+    assert_eq!(
+        mutation.annotations.as_ref().unwrap().read_only_hint,
+        Some(false)
+    );
+    assert_eq!(
+        mutation.annotations.as_ref().unwrap().destructive_hint,
+        Some(false)
+    );
+    let (error, out, _) = call(
+        &client,
+        "create_notebook",
+        json!({"name":"Checkout incident","incident_start":"2026-11-23T00:00:00Z"}),
+    )
+    .await;
+    assert!(!error, "{out}");
+    assert_eq!(out["result"]["data"]["id"], id);
+    assert_eq!(
+        out["links"]["notebook"],
+        format!("https://rush.example.com/notebooks/{id}?tenant=prod")
+    );
+    let (error, out, _) = call(&client,"add_notebook_cell",json!({"notebook_id":id,"cell_type":"note","title":"Findings","body":"Confirmed: provider timeouts."})).await;
+    assert!(!error, "{out}");
+    assert_eq!(out["result"]["data"]["id"], cell_id);
+    assert!(
+        !call(&client, "list_notebooks", json!({"contains":"Checkout"}))
+            .await
+            .0
+    );
+    assert!(
+        !call(&client, "get_notebook", json!({"notebook_id":id}))
+            .await
+            .0
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_write_denials_are_reported_without_claiming_a_save() {
+    let rush = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/notebooks"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("write role required"))
+        .expect(1)
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &["--toolsets", "notebooks"]).await;
+    let (error, _, text) = call(
+        &client,
+        "create_notebook",
+        json!({"name":"Incident","incident_start":"2026-11-23T00:00:00Z"}),
+    )
+    .await;
+    assert!(error);
+    assert!(text.contains("write role required"));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn toolset_flags_limit_what_clients_see() {
     let rush = MockServer::start().await;
     let client = connect(

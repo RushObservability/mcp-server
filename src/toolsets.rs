@@ -7,6 +7,7 @@ pub enum Toolset {
     Analysis,
     Alerting,
     Dashboards,
+    Notebooks,
     Changes,
     SavedQueries,
     SreAgent,
@@ -18,6 +19,7 @@ impl Toolset {
         Toolset::Analysis,
         Toolset::Alerting,
         Toolset::Dashboards,
+        Toolset::Notebooks,
         Toolset::Changes,
         Toolset::SavedQueries,
         Toolset::SreAgent,
@@ -29,6 +31,7 @@ impl Toolset {
             Toolset::Analysis => "analysis",
             Toolset::Alerting => "alerting",
             Toolset::Dashboards => "dashboards",
+            Toolset::Notebooks => "notebooks",
             Toolset::Changes => "changes",
             Toolset::SavedQueries => "saved_queries",
             Toolset::SreAgent => "sre_agent",
@@ -59,6 +62,9 @@ impl Toolset {
             }
             Toolset::Dashboards => {
                 "dashboards: search dashboards, read their widgets, and run a widget's query"
+            }
+            Toolset::Notebooks => {
+                "notebooks: list and read incident notebooks; create notebooks and append evidence with a write-role key"
             }
             Toolset::Changes => "changes: deploy markers",
             Toolset::SavedQueries => "saved_queries: list and run saved Explore queries",
@@ -114,6 +120,12 @@ impl Toolset {
                 "get_widget_data",
             ],
             Toolset::Changes => &["list_deploys"],
+            Toolset::Notebooks => &[
+                "list_notebooks",
+                "get_notebook",
+                "create_notebook",
+                "add_notebook_cell",
+            ],
             Toolset::SavedQueries => &["list_saved_queries", "run_saved_query"],
             Toolset::SreAgent => &[
                 "start_investigation",

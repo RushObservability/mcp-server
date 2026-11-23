@@ -11,7 +11,12 @@ all-features = true
 [advisories]
 unmaintained = "workspace"
 unsound = "all"
-ignore = []
+# Review by 2026-12-23. Existing time parsing and the rmcp/schemars stack use
+# chrono; migrating that code needs a separate change. Keep other advisories
+# and the workspace-wide maintenance policy enforced.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "Existing chrono time handling and MCP dependencies; maintenance exception to review by 2026-12-23" },
+]
 
 [bans]
 multiple-versions = "warn"

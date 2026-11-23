@@ -40,6 +40,14 @@ impl Links {
         }
     }
 
+    pub fn notebooks(&self) -> String {
+        self.build("/notebooks", &[])
+    }
+
+    pub fn notebook(&self, id: &str) -> String {
+        self.build(&format!("/notebooks/{id}"), &[])
+    }
+
     fn build(&self, path: &str, params: &[(&str, String)]) -> String {
         let mut url = self.web.clone();
         url.set_path(path);
