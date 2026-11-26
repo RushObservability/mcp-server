@@ -502,6 +502,87 @@ async fn widget_data_runs_the_widget_query_with_variables() {
     client.cancel().await.unwrap();
 }
 
+#[tokio::test]
+async fn widget_queries_run_concurrently_in_order() {
+    let rush = MockServer::start().await;
+    Mock::given(path("/api/v1/dashboards/d1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "d1", "name": "Checkout",
+            "widgets": [{"id": "w1", "title": "Rates", "widget_type": "timeseries",
+                         "query_config": {"queries": [{"source": "metrics", "promql": "a"}, {"source": "metrics", "promql": "b"}, {"source": "metrics", "promql": "c"}]}},
+                        {"id": "w2", "title": "Broken", "widget_type": "timeseries",
+                         "query_config": {"queries": [{"source": "metrics", "promql": "slow_missing"}, {"source": "metrics", "promql": "fast_bad"}]}}]
+        })))
+        .mount(&rush)
+        .await;
+    let delay = Duration::from_millis(400);
+    let matrix = query_response(
+        "metrics",
+        "range",
+        json!({"status": "success", "data": {"resultType": "matrix", "result": []}}),
+    );
+    for q in ["a", "b", "c"] {
+        Mock::given(body_partial_json(json!({"options": {"query": q}})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(matrix.clone())
+                    .set_delay(delay),
+            )
+            .mount(&rush)
+            .await;
+    }
+    Mock::given(body_partial_json(
+        json!({"options": {"query": "slow_missing"}}),
+    ))
+    .respond_with(
+        ResponseTemplate::new(404)
+            .set_body_string("missing metric")
+            .set_delay(delay),
+    )
+    .mount(&rush)
+    .await;
+    Mock::given(body_partial_json(json!({"options": {"query": "fast_bad"}})))
+        .respond_with(ResponseTemplate::new(400).set_body_string("bad query"))
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &[]).await;
+
+    let started = std::time::Instant::now();
+    let (is_error, out, _) = call(
+        &client,
+        "get_widget_data",
+        json!({"dashboard": "d1", "widget": "w1"}),
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(
+        started.elapsed() < delay * 2,
+        "took {:?}",
+        started.elapsed()
+    );
+    let order: Vec<&str> = out["result"]["queries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| q["query"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, ["a", "b", "c"]);
+
+    // The first failing query in widget order wins, not the first to fail.
+    let (is_error, _, text) = call(
+        &client,
+        "get_widget_data",
+        json!({"dashboard": "d1", "widget": "w2"}),
+    )
+    .await;
+    assert!(is_error);
+    assert!(
+        text.contains("missing metric") && !text.contains("bad query"),
+        "{text}"
+    );
+    client.cancel().await.unwrap();
+}
+
 fn sse(events: &[Value]) -> String {
     events
         .iter()

@@ -1284,6 +1284,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-core",
+ "futures-util",
  "http",
  "reqwest",
  "rmcp",
