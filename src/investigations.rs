@@ -25,6 +25,7 @@ const KEEP_FINISHED: Duration = Duration::from_secs(15 * 60);
 const MAX_RUNNING: usize = 32;
 /// Tool steps kept per run.
 const MAX_STEPS: usize = 200;
+const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
 
 /// One agent tool call and its result, each shortened to one line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,7 +247,11 @@ pub async fn follow(mut resp: reqwest::Response, live: Arc<Live>) {
     let error = loop {
         match resp.chunk().await {
             Ok(Some(bytes)) => {
-                for data in parser.push(&bytes) {
+                let events = match parser.push(&bytes) {
+                    Ok(events) => events,
+                    Err(error) => break error.to_string(),
+                };
+                for data in events {
                     if let Ok(event) = serde_json::from_str::<Value>(&data) {
                         live.update(|p| p.apply(&event));
                     }
@@ -261,37 +266,59 @@ pub async fn follow(mut resp: reqwest::Response, live: Arc<Live>) {
             break String::new();
         }
     };
-    live.update(|p| p.finish((!error.is_empty()).then_some(error)));
-    // Keep reading after `done` so the agent can save the run before the
-    // stream closes, since closing it early cancels the run.
-    while let Ok(Some(_)) = resp.chunk().await {}
+    let done = error.is_empty();
+    live.update(|p| p.finish((!done).then_some(error)));
+    // After `done`, let the agent save the run before closing its stream.
+    // On a read or size error, stop reading the response.
+    if done {
+        while let Ok(Some(_)) = resp.chunk().await {}
+    }
 }
 
 /// Splits a server-sent event stream into the `data` of each event.
 #[derive(Debug, Default)]
 pub struct SseParser {
-    buf: String,
+    line: Vec<u8>,
+    event_bytes: usize,
+    data: Vec<u8>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("an SRE agent event exceeded the 1 MiB stream limit")]
+pub struct SseEventTooLarge;
+
 impl SseParser {
-    pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
-        self.buf.push_str(&String::from_utf8_lossy(bytes));
-        if self.buf.contains('\r') {
-            self.buf = self.buf.replace("\r\n", "\n");
-        }
-        let mut out = Vec::new();
-        while let Some(end) = self.buf.find("\n\n") {
-            let frame: String = self.buf.drain(..end + 2).collect();
-            let data: Vec<&str> = frame
-                .lines()
-                .filter_map(|l| l.strip_prefix("data:"))
-                .map(|d| d.strip_prefix(' ').unwrap_or(d))
-                .collect();
-            if !data.is_empty() {
-                out.push(data.join("\n"));
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, SseEventTooLarge> {
+        let mut events = Vec::new();
+        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if part.len() > MAX_SSE_EVENT_BYTES - self.event_bytes - self.line.len() {
+                return Err(SseEventTooLarge);
             }
+            self.line.extend_from_slice(part);
+            if !part.ends_with(b"\n") {
+                continue;
+            }
+
+            let line = &self.line[..self.line.len() - 1];
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.is_empty() {
+                if !self.data.is_empty() {
+                    self.data.pop();
+                    events.push(String::from_utf8_lossy(&self.data).into_owned());
+                    self.data.clear();
+                }
+                self.event_bytes = 0;
+            } else {
+                self.event_bytes += self.line.len();
+                if let Some(data) = line.strip_prefix(b"data:") {
+                    self.data
+                        .extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
+                    self.data.push(b'\n');
+                }
+            }
+            self.line.clear();
         }
-        out
+        Ok(events)
     }
 }
 
@@ -322,11 +349,32 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn sse_budget_applies_per_event_and_preserves_split_utf8() {
+        let mut parser = SseParser::default();
+        let event = "data: café\r\n\r\n".as_bytes();
+        let cut = event.iter().position(|byte| *byte == 0xc3).unwrap() + 1;
+        assert!(parser.push(&event[..cut]).unwrap().is_empty());
+        assert_eq!(parser.push(&event[cut..]).unwrap(), ["café"]);
+
+        let complete = b"data: ok\n\n".repeat(MAX_SSE_EVENT_BYTES / 10);
+        assert!(complete.len() > MAX_SSE_EVENT_BYTES / 2);
+        assert!(!parser.push(&complete).unwrap().is_empty());
+        assert!(
+            parser
+                .push(&vec![b' '; MAX_SSE_EVENT_BYTES])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parser.push(b" ").is_err());
+    }
+
+    #[test]
     fn sse_frames_split_across_chunks_and_line_endings() {
         let mut p = SseParser::default();
-        assert!(p.push(b"data: {\"type\":\"session_").is_empty());
-        let out =
-            p.push(b"created\",\"session_id\":\"s1\"}\r\n\r\n: keep-alive\n\ndata: a\ndata: b\n\n");
+        assert!(p.push(b"data: {\"type\":\"session_").unwrap().is_empty());
+        let out = p
+            .push(b"created\",\"session_id\":\"s1\"}\r\n\r\n: keep-alive\n\ndata: a\ndata: b\n\n")
+            .unwrap();
         assert_eq!(
             out,
             vec![r#"{"type":"session_created","session_id":"s1"}"#, "a\nb"]
