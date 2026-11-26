@@ -220,6 +220,8 @@ hour).
 | `--transport` | | `stdio` | `stdio` or `http` |
 | `--listen` | `RUSH_MCP_LISTEN` | `127.0.0.1:8090` | HTTP listen address |
 | `--base-path` | `RUSH_MCP_BASE_PATH` | `/mcp` | HTTP path for the MCP endpoint |
+| `--max-http-sessions` | `RUSH_MCP_MAX_HTTP_SESSIONS` | `256` | Concurrent HTTP MCP sessions |
+| `--max-http-sessions-per-key` | `RUSH_MCP_MAX_HTTP_SESSIONS_PER_KEY` | `32` | Concurrent HTTP MCP sessions per client key (the server token counts as one key) |
 | `--server-token` | `RUSH_MCP_SERVER_TOKEN` | | Token clients must send to use the server's own key in HTTP mode |
 | `--allowed-hosts` | `RUSH_MCP_ALLOWED_HOSTS` | loopback | Accepted `Host` headers in HTTP mode |
 | `--allowed-origins` | `RUSH_MCP_ALLOWED_ORIGINS` | | Accepted browser `Origin`s in HTTP mode |
@@ -238,12 +240,25 @@ There are two ways for clients to authenticate:
 
 - **Bring their own key.** Clients send `Authorization: Bearer rush_qry_…`
   and the server uses that key for their calls. No server key is needed.
+  The server checks each key with Rush and reuses the answer for up to a
+  minute, so a revoked key stops working within 60 seconds.
 - **Share the server's key.** Start the server with `RUSH_API_KEY` and clients
   send `Authorization: Bearer <RUSH_MCP_SERVER_TOKEN>`. The server refuses to
-  start this way on a non-loopback address without a server token.
+  start this way without a server token on a non-loopback address, or when
+  `--allowed-hosts` names a non-loopback host (a loopback bind behind a
+  reverse proxy is reachable from the network).
+
+Upgrading: a server that shares its key, listens on loopback and sets
+`--allowed-hosts` to a public name now fails to start until you set
+`RUSH_MCP_SERVER_TOKEN` or switch clients to their own keys.
 
 Set `--allowed-hosts` to the hostnames clients use, so DNS-rebinding attempts
 are rejected.
+
+A session can only be used with the key that opened it; any other key gets
+404 for that session ID. One key may hold at most
+`--max-http-sessions-per-key` sessions and 4 running SRE agent investigations,
+so a single client can't take every slot.
 
 ## Security
 

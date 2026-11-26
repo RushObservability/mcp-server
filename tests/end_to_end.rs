@@ -731,6 +731,55 @@ async fn parse_query_returns_filters_for_the_signal_and_a_link() {
 }
 
 #[tokio::test]
+async fn ids_from_links_and_upstream_data_cannot_leave_their_api_route() {
+    let rush = MockServer::start().await;
+    mock_whoami(&rush).await;
+    Mock::given(path("/api/admin/api-keys"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("ADMIN-SECRET"))
+        .mount(&rush)
+        .await;
+    Mock::given(path("/prom/api/v1/values"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"status":"success","data":["x"]})),
+        )
+        .mount(&rush)
+        .await;
+    Mock::given(path("/api/v1/anomaly-events/ev1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"id":"ev1","rule_id":"../../admin/api-keys","state":"anomalous"}),
+        ))
+        .mount(&rush)
+        .await;
+    let client = connect(&rush, &[]).await;
+
+    for saved in [
+        "https://rush.example.com/?saved=../../admin/api-keys",
+        "https://rush.example.com/?saved=..%2F..%2Fadmin%2Fapi-keys",
+        "https://rush.example.com/?saved=x%3Fid%3D1",
+    ] {
+        let (is_error, _, text) =
+            call(&client, "run_saved_query", json!({"saved_query": saved})).await;
+        assert!(is_error, "{saved}");
+        assert!(!text.contains("ADMIN-SECRET"), "{text}");
+    }
+    let (is_error, _, _) = call(&client, "list_metric_labels", json!({"label": ".."})).await;
+    assert!(is_error);
+    let (is_error, _, _) = call(&client, "get_anomaly", json!({"event_id": "ev1"})).await;
+    assert!(!is_error);
+
+    let escaped: Vec<String> = rush
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .filter(|p| p.contains("admin") || p == "/prom/api/v1/values" || p.contains('?'))
+        .collect();
+    assert!(escaped.is_empty(), "{escaped:?}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn telemetry_names_in_summaries_are_clipped_and_quoted() {
     let rush = MockServer::start().await;
     mock_whoami(&rush).await;

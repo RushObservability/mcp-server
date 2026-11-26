@@ -217,7 +217,8 @@ pub fn id_from(input: &str, segment: &str) -> Option<String> {
     is_plain_id(s).then(|| s.to_string())
 }
 
-fn is_plain_id(s: &str) -> bool {
+/// A value safe to put in one API path segment: no `/`, `.`, `?`, `%` or `#`.
+pub fn is_plain_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
         && s.chars()
@@ -230,11 +231,10 @@ pub fn saved_query_id_from(input: &str) -> Option<String> {
     if let Ok(url) = Url::parse(s) {
         return url
             .query_pairs()
-            .find(|(k, v)| k == "saved" && !v.is_empty())
+            .find(|(k, v)| k == "saved" && is_plain_id(v))
             .map(|(_, v)| v.into_owned());
     }
-    (!s.is_empty() && s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-        .then(|| s.to_string())
+    is_plain_id(s).then(|| s.to_string())
 }
 
 fn is_trace_id(s: &str) -> bool {
@@ -329,6 +329,15 @@ mod tests {
             Some("c7e43c71-2aa5")
         );
         assert_eq!(saved_query_id_from("../etc"), None);
+        // The decoded `saved=` value must not escape the saved-queries route.
+        for bad in [
+            "https://rush.example.com/?saved=../../admin/api-keys",
+            "https://rush.example.com/?saved=..%2F..%2Fadmin%2Fapi-keys",
+            "https://rush.example.com/?saved=x%3Flimit%3D1",
+            "https://rush.example.com/?saved=x%23frag",
+        ] {
+            assert_eq!(saved_query_id_from(bad), None, "{bad}");
+        }
         assert_eq!(
             id_from("https://rush.example.com/alerts/m-1?tenant=prod", "alerts").as_deref(),
             Some("m-1")
