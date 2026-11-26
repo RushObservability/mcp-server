@@ -212,7 +212,7 @@ hour).
 | `--url` | `RUSH_URL` | required | Rush API base URL |
 | `--web-url` | `RUSH_WEB_URL` | `--url` | Rush UI base URL used in links |
 | `--api-key` | `RUSH_API_KEY` | | Query API key (`rush_qry_…`) |
-| `--api-key-file` | `RUSH_API_KEY_FILE` | | File with the key, re-read on every request so a rotated key needs no restart |
+| `--api-key-file` | `RUSH_API_KEY_FILE` | | File with the key, re-read at most once a second so a rotated key needs no restart |
 | `--toolsets` | `RUSH_MCP_TOOLSETS` | `core,analysis,alerting,changes,saved_queries` | Toolsets to enable, or `all` |
 | `--enable-tools` | | | Only expose these tools |
 | `--disable-tools` | | | Hide these tools |

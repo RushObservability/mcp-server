@@ -1,7 +1,8 @@
 //! HTTP client for the Rush query API.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
@@ -12,12 +13,14 @@ use crate::envelope::clip;
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 2048;
+/// How long a key read from RUSH_API_KEY_FILE is reused before the file is read again.
+const KEY_FILE_TTL: Duration = Duration::from_secs(1);
 
 /// Where the server's own API key comes from.
 #[derive(Debug, Clone)]
 pub enum KeySource {
     Static(String),
-    /// Re-read on every request so a rotated key takes effect without a restart.
+    /// Re-read at most once a second so a rotated key takes effect without a restart.
     File(PathBuf),
     None,
 }
@@ -85,6 +88,8 @@ pub struct RushClient {
     http: reqwest::Client,
     base: Url,
     key: KeySource,
+    /// The last key read from a key file, and when it was read.
+    file_key: Arc<Mutex<Option<(Instant, String)>>>,
 }
 
 impl RushClient {
@@ -93,7 +98,12 @@ impl RushClient {
             .timeout(timeout)
             .user_agent(concat!("rush-mcp/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        Ok(Self { http, base, key })
+        Ok(Self {
+            http,
+            base,
+            key,
+            file_key: Arc::default(),
+        })
     }
 
     pub fn base(&self) -> &Url {
@@ -102,14 +112,35 @@ impl RushClient {
 
     /// The key for one request: the HTTP client's own key if it sent one,
     /// otherwise the server's configured key.
-    fn resolve_key(&self, client_key: Option<&ClientKey>) -> Result<String, ApiError> {
+    async fn resolve_key(&self, client_key: Option<&ClientKey>) -> Result<String, ApiError> {
         if let Some(ClientKey(k)) = client_key {
             return Ok(k.clone());
         }
-        self.key
-            .read()?
-            .filter(|k| !k.is_empty())
+        let key = match &self.key {
+            KeySource::File(_) => self.read_key_file().await?,
+            other => other.read()?,
+        };
+        key.filter(|k| !k.is_empty())
             .ok_or(ApiError::Unauthorized(None))
+    }
+
+    /// The key file's contents, reused for `KEY_FILE_TTL` and read off the
+    /// async runtime so requests don't block on the filesystem.
+    async fn read_key_file(&self) -> Result<Option<String>, ApiError> {
+        if let Some((read_at, key)) = &*self.file_key.lock().unwrap_or_else(|e| e.into_inner())
+            && read_at.elapsed() < KEY_FILE_TTL
+        {
+            return Ok(Some(key.clone()));
+        }
+        let source = self.key.clone();
+        let key = tokio::task::spawn_blocking(move || source.read())
+            .await
+            .map_err(|e| ApiError::Config(format!("can't read RUSH_API_KEY_FILE: {e}")))??;
+        if let Some(k) = &key {
+            *self.file_key.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((Instant::now(), k.clone()));
+        }
+        Ok(key)
     }
 
     pub async fn get<T: DeserializeOwned>(
@@ -145,7 +176,7 @@ impl RushClient {
         body: &B,
         timeout: Duration,
     ) -> Result<reqwest::Response, ApiError> {
-        let key = self.resolve_key(client_key)?;
+        let key = self.resolve_key(client_key).await?;
         let req = self
             .request(Method::POST, &key, tool, path)?
             .timeout(timeout)
@@ -188,7 +219,7 @@ impl RushClient {
         query: &[(&str, String)],
         body: Option<&B>,
     ) -> Result<T, ApiError> {
-        let key = self.resolve_key(client_key)?;
+        let key = self.resolve_key(client_key).await?;
         let value = body
             .map(serde_json::to_value)
             .transpose()
@@ -266,7 +297,10 @@ async fn body_prefix(
     mut response: reqwest::Response,
     limit: usize,
 ) -> Result<(Vec<u8>, bool), reqwest::Error> {
-    let mut bytes = Vec::new();
+    let reserve = response
+        .content_length()
+        .map_or(0, |n| n.min(limit as u64) as usize);
+    let mut bytes = Vec::with_capacity(reserve);
     while let Some(chunk) = response.chunk().await? {
         let remaining = limit - bytes.len();
         bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
@@ -430,6 +464,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn body_reader_reserves_the_content_length() {
+        let server = MockServer::start().await;
+        let body = vec![b'x'; 1_000_000];
+        Mock::given(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+        let response = reqwest::get(format!("{}/big", server.uri())).await.unwrap();
+        let (bytes, over_limit) = body_prefix(response, MAX_RESPONSE_BYTES).await.unwrap();
+        assert_eq!((bytes.len(), over_limit), (body.len(), false));
+        assert_eq!(bytes.capacity(), body.len(), "one allocation, no regrowth");
+    }
+
+    #[tokio::test]
     async fn a_key_file_is_reread_each_request() {
         let dir = std::env::temp_dir().join(format!("rush-mcp-key-{}", std::process::id()));
         std::fs::write(&dir, "rush_qry_one\n").unwrap();
@@ -438,5 +486,36 @@ mod tests {
         std::fs::write(&dir, "rush_qry_two").unwrap();
         assert_eq!(source.read().unwrap().as_deref(), Some("rush_qry_two"));
         std::fs::remove_file(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_key_file_is_cached_briefly_and_rotation_is_picked_up() {
+        let file = std::env::temp_dir().join(format!("rush-mcp-key-ttl-{}", std::process::id()));
+        std::fs::write(&file, "rush_qry_one\n").unwrap();
+        let c = RushClient::new(
+            Url::parse("http://127.0.0.1:1").unwrap(),
+            KeySource::File(file.clone()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(c.resolve_key(None).await.unwrap(), "rush_qry_one");
+        std::fs::write(&file, "rush_qry_two").unwrap();
+        assert_eq!(
+            c.clone().resolve_key(None).await.unwrap(),
+            "rush_qry_one",
+            "served from the cache, shared by clones"
+        );
+        tokio::time::sleep(KEY_FILE_TTL + Duration::from_millis(100)).await;
+        assert_eq!(c.resolve_key(None).await.unwrap(), "rush_qry_two");
+        std::fs::remove_file(&file).unwrap();
+        assert!(matches!(
+            c.resolve_key(None).await,
+            Ok(k) if k == "rush_qry_two"
+        ));
+        tokio::time::sleep(KEY_FILE_TTL + Duration::from_millis(100)).await;
+        assert!(matches!(
+            c.resolve_key(None).await,
+            Err(ApiError::Config(_))
+        ));
     }
 }

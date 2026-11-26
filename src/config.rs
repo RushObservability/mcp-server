@@ -30,7 +30,7 @@ pub struct Config {
     #[arg(long = "api-key", env = "RUSH_API_KEY", hide_env_values = true)]
     pub api_key: Option<String>,
 
-    /// File holding the API key, re-read on every request so rotation needs
+    /// File holding the API key, re-read at most once a second so rotation needs
     /// no restart. Takes precedence over --api-key.
     #[arg(long = "api-key-file", env = "RUSH_API_KEY_FILE")]
     pub api_key_file: Option<std::path::PathBuf>,
