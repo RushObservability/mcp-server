@@ -71,6 +71,10 @@ pub struct Config {
     #[arg(long, env = "RUSH_MCP_MAX_HTTP_SESSIONS", default_value_t = 256)]
     pub max_http_sessions: usize,
 
+    /// Maximum number of concurrent HTTP MCP sessions per client key.
+    #[arg(long, env = "RUSH_MCP_MAX_HTTP_SESSIONS_PER_KEY", default_value_t = 32)]
+    pub max_http_sessions_per_key: usize,
+
     /// HTTP path for the MCP endpoint.
     #[arg(long = "base-path", env = "RUSH_MCP_BASE_PATH", default_value = "/mcp")]
     pub base_path: String,
@@ -160,6 +164,9 @@ impl Config {
         }
         if self.max_http_sessions == 0 {
             return Err("--max-http-sessions must be positive".into());
+        }
+        if self.max_http_sessions_per_key == 0 {
+            return Err("--max-http-sessions-per-key must be positive".into());
         }
         let has_key = self.api_key.is_some() || self.api_key_file.is_some();
         match self.transport {
