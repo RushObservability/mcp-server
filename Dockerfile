@@ -6,8 +6,8 @@ COPY src ./src
 COPY contracts ./contracts
 RUN cargo build --locked --release && strip target/release/rush-mcp
 
-FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=build /src/target/release/rush-mcp /usr/local/bin/rush-mcp
-USER nonroot
+FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:eaa0c377a38e4c67f4192fd5fe9d24d39d51c4531613d97731537f9d33460ae4
+COPY --from=build --chown=65532:65532 /src/target/release/rush-mcp /usr/local/bin/rush-mcp
+USER 65532:65532
 # stdio by default; use `--transport http --listen 0.0.0.0:8090` for HTTP.
 ENTRYPOINT ["/usr/local/bin/rush-mcp"]

@@ -10,6 +10,9 @@ use url::Url;
 
 use crate::envelope::clip;
 
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ERROR_BODY_BYTES: usize = 2048;
+
 /// Where the server's own API key comes from.
 #[derive(Debug, Clone)]
 pub enum KeySource {
@@ -63,6 +66,8 @@ pub enum ApiError {
     Upstream(u16, String),
     #[error("Couldn't reach Rush at {0}: {1}")]
     Network(String, String),
+    #[error("Rush returned more than {0} bytes. Narrow the query or lower the result limit.")]
+    ResponseTooLarge(usize),
     #[error(
         "Rush returned a response this server couldn't read ({0}). The Rush API may be a different version."
     )]
@@ -233,10 +238,18 @@ impl RushClient {
             "rush api call"
         );
         if status.is_success() {
-            let bytes = resp
-                .bytes()
+            if resp
+                .content_length()
+                .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+            {
+                return Err(ApiError::ResponseTooLarge(MAX_RESPONSE_BYTES));
+            }
+            let (bytes, truncated) = body_prefix(resp, MAX_RESPONSE_BYTES)
                 .await
-                .map_err(|e| ApiError::Network(self.base.to_string(), e.to_string()))?;
+                .map_err(|e| ApiError::Network(self.base.to_string(), network_message(&e)))?;
+            if truncated {
+                return Err(ApiError::ResponseTooLarge(MAX_RESPONSE_BYTES));
+            }
             return (if let Some(request) = unified {
                 crate::query_contract::decode(&bytes, &request)
             } else {
@@ -248,6 +261,22 @@ impl RushClient {
     }
 }
 
+/// Retain at most `limit` bytes, even when the response has no Content-Length.
+async fn body_prefix(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<(Vec<u8>, bool), reqwest::Error> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let remaining = limit - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if chunk.len() > remaining {
+            return Ok((bytes, true));
+        }
+    }
+    Ok((bytes, false))
+}
+
 /// Map a failed response to an error the model can act on.
 async fn error_from(resp: reqwest::Response, key: &str, path: &str) -> ApiError {
     let status = resp.status();
@@ -256,7 +285,10 @@ async fn error_from(resp: reqwest::Response, key: &str, path: &str) -> ApiError 
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok());
-    let text = clip(resp.text().await.unwrap_or_default().trim(), 500);
+    let (bytes, _) = body_prefix(resp, MAX_ERROR_BODY_BYTES)
+        .await
+        .unwrap_or_default();
+    let text = clip(String::from_utf8_lossy(&bytes).trim(), 500);
     match status {
         StatusCode::BAD_REQUEST
         | StatusCode::UNPROCESSABLE_ENTITY
@@ -295,6 +327,24 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn body_reader_retains_only_the_requested_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/example"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("example body"))
+            .mount(&server)
+            .await;
+        for (limit, want, truncated) in [(7, "example", true), (12, "example body", false)] {
+            let response = reqwest::get(format!("{}/example", server.uri()))
+                .await
+                .unwrap();
+            let (bytes, over_limit) = body_prefix(response, limit).await.unwrap();
+            assert_eq!(bytes, want.as_bytes());
+            assert_eq!(over_limit, truncated);
+        }
+    }
 
     async fn client(server: &MockServer) -> RushClient {
         RushClient::new(
