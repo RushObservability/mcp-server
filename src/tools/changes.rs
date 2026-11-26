@@ -14,7 +14,7 @@ use crate::api::{Deploy, DeploysResponse};
 use crate::envelope::{Envelope, Hint, Trim, clip};
 use crate::server::RushMcp;
 use crate::time::TimeArgs;
-use crate::tools::pop;
+use crate::tools::{pop, quoted};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListDeploysArgs {
@@ -83,12 +83,12 @@ impl RushMcp {
                 Some(d) => format!(
                     "{} deploys; latest {} {} at {}.",
                     deploys.len(),
-                    d.service_name,
-                    if d.version.is_empty() {
+                    quoted(&d.service_name),
+                    quoted(if d.version.is_empty() {
                         &d.commit_sha
                     } else {
                         &d.version
-                    },
+                    }),
                     d.deployed_at
                 ),
                 None => "No deploys in this window.".into(),

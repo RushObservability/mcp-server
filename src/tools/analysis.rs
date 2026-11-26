@@ -25,7 +25,7 @@ use crate::server::{RushMcp, ToolError};
 use crate::time::{TimeArgs, Window, bucket_for, parse_instant};
 use crate::tools::core::{Latency, latency_from_buckets};
 use crate::tools::{
-    Query, QueryArgs, keep, minutes_ending_now, ns_to_time, pct, pop, round2, thousands,
+    Query, QueryArgs, keep, minutes_ending_now, ns_to_time, pct, pop, quoted, round2, thousands,
 };
 
 /// An alternative window to compare against.
@@ -178,12 +178,18 @@ fn strongest(c: &Cohorts) -> Option<String> {
             if v.baseline_pct == 0.0 {
                 format!(
                     "{}={} is {}% of the selection and absent from the baseline",
-                    d.dimension, v.value, v.selection_pct
+                    clip(&d.dimension, 80),
+                    quoted(&v.value),
+                    v.selection_pct
                 )
             } else {
                 format!(
                     "{}={} is {}% of the selection vs {}% of the baseline ({}x)",
-                    d.dimension, v.value, v.selection_pct, v.baseline_pct, v.lift
+                    clip(&d.dimension, 80),
+                    quoted(&v.value),
+                    v.selection_pct,
+                    v.baseline_pct,
+                    v.lift
                 )
             }
         })
@@ -702,13 +708,13 @@ impl RushMcp {
             let mut env = Envelope::new(
                 format!(
                     "{} {} log from {} at {}.",
-                    out.severity,
+                    clip(&out.severity, 20),
                     if out.trace_id.is_empty() {
                         "untraced"
                     } else {
                         "traced"
                     },
-                    out.service,
+                    quoted(&out.service),
                     out.time
                 ),
                 out,
@@ -824,7 +830,7 @@ mod tests {
         assert_eq!(c.dimensions.len(), 1, "empty dimensions are dropped");
         assert_eq!(c.dimensions[0].values[0].value, "checkout");
         assert_eq!(c.dimensions[0].values.len(), 2);
-        assert!(strongest(&c).unwrap().contains("Service=checkout"));
+        assert!(strongest(&c).unwrap().contains("Service=\"checkout\""));
 
         // Errors-only selections don't report the error status as a finding.
         let status = BubbleUpResponse {
