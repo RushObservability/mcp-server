@@ -1,6 +1,8 @@
 //! Generated from query-api/contracts/client.rs. Run query-api/scripts/sync-query-contract.py.
 //! Transport adapter only. Validation, authorization and query execution belong to the API.
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 pub const ENDPOINT: &str = "/api/v1/query/execute";
@@ -67,20 +69,34 @@ pub fn prom_request(path: &str, params: &[(&str, String)]) -> Option<Value> {
         "filters":[], "search":null, "options":options}))
 }
 
+/// The envelope fields, with `data` kept as raw bytes so it is decoded once, after the check.
+#[derive(Deserialize)]
+struct Envelope<'a> {
+    version: Option<Value>,
+    signal: Option<Value>,
+    operation: Option<Value>,
+    #[serde(borrow)]
+    data: Option<&'a RawValue>,
+}
+
 /// Reject a wrong version or a response for a different query before decoding data.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8], request: &Value) -> Result<T, serde_json::Error> {
-    let envelope: Value = serde_json::from_slice(bytes)?;
-    for key in ["version", "signal", "operation"] {
-        if envelope.get(key) != request.get(key) {
+    let envelope: Envelope = serde_json::from_slice(bytes)?;
+    for (key, value) in [
+        ("version", &envelope.version),
+        ("signal", &envelope.signal),
+        ("operation", &envelope.operation),
+    ] {
+        if value.as_ref() != request.get(key) {
             return Err(<serde_json::Error as serde::de::Error>::custom(
                 "query response contract mismatch",
             ));
         }
     }
-    let data = envelope.get("data").cloned().ok_or_else(|| {
+    let data = envelope.data.ok_or_else(|| {
         <serde_json::Error as serde::de::Error>::custom("query response is missing data")
     })?;
-    serde_json::from_value(data)
+    serde_json::from_str(data.get())
 }
 
 #[cfg(test)]
@@ -119,5 +135,35 @@ mod tests {
         let request = json!({"version":"v1", "signal":"logs", "operation":"search"});
         assert!(decode::<Value>(br#"{"version":"v2","data":{}}"#, &request).is_err());
         assert!(decode::<Value>(br#"{"rows":[]}"#, &request).is_err());
+    }
+
+    #[test]
+    fn decode_checks_the_contract_before_the_data() {
+        let request = json!({"version":"v1", "signal":"metrics", "operation":"range"});
+        // A newer API with a different data shape reports the mismatch, not a data error.
+        let v2 = br#"{"data":{"other":1},"version":"v2","signal":"metrics","operation":"range"}"#;
+        let err = decode::<crate::api::PromEnvelope<crate::api::PromData>>(v2, &request);
+        assert!(err.unwrap_err().to_string().contains("contract mismatch"));
+        let other = br#"{"version":"v1","signal":"logs","operation":"range","data":{}}"#;
+        assert!(decode::<Value>(other, &request).is_err());
+        let missing = br#"{"version":"v1","signal":"metrics","operation":"range","meta":{}}"#;
+        let err = decode::<Value>(missing, &request).unwrap_err();
+        assert!(err.to_string().contains("missing data"));
+    }
+
+    #[test]
+    fn decode_returns_the_data_unchanged() {
+        let request = json!({"version":"v1", "signal":"metrics", "operation":"range"});
+        let data = json!({"status":"success", "data":{"resultType":"matrix", "result":[
+            {"metric":{"service":"a\"b"}, "values":[[1.5, "1"], [3.0, "2e3"]]},
+            {"metric":{"service":"é"}, "values":[[1.5, "NaN"]]}]}});
+        let body = json!({"meta":{"x":1}, "data":data, "version":"v1",
+            "signal":"metrics", "operation":"range"});
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert_eq!(decode::<Value>(&bytes, &request).unwrap(), data);
+        let typed: crate::api::PromEnvelope<crate::api::PromData> =
+            decode(&bytes, &request).unwrap();
+        assert_eq!(typed.data.result_type, "matrix");
+        assert_eq!(typed.data.result, data["data"]["result"]);
     }
 }

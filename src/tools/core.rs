@@ -1020,7 +1020,11 @@ pub fn shape_prom(
     max_series: usize,
 ) -> MetricsResult {
     let mut series = Vec::new();
-    let items = data.result.as_array().cloned().unwrap_or_default();
+    let scalar = prom_value(&data.result);
+    let items = match data.result {
+        serde_json::Value::Array(items) => items,
+        _ => Vec::new(),
+    };
     let total = items.len();
     for item in items.iter().take(max_series) {
         let labels: BTreeMap<String, String> = item
@@ -1061,7 +1065,7 @@ pub fn shape_prom(
         });
     }
     if data.result_type == "scalar" || data.result_type == "string" {
-        if let Some((t, v)) = prom_value(&data.result) {
+        if let Some((t, v)) = scalar {
             series.push(SeriesSummary {
                 labels: BTreeMap::new(),
                 last: Some(round_sig(v)),
@@ -2536,6 +2540,12 @@ mod tests {
             shape_prom("q", vector, true, 10).series[0].last,
             Some(0.1235)
         );
+        let scalar = PromData {
+            result_type: "scalar".into(),
+            result: serde_json::json!([5.0, "2"]),
+        };
+        let r = shape_prom("q", scalar, true, 10);
+        assert_eq!(r.series.last().unwrap().points, [(5.0, 2.0)]);
     }
 
     #[test]
