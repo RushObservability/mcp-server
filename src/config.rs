@@ -67,6 +67,10 @@ pub struct Config {
     #[arg(long, env = "RUSH_MCP_LISTEN", default_value = "127.0.0.1:8090")]
     pub listen: SocketAddr,
 
+    /// Maximum number of concurrent HTTP MCP sessions.
+    #[arg(long, env = "RUSH_MCP_MAX_HTTP_SESSIONS", default_value_t = 256)]
+    pub max_http_sessions: usize,
+
     /// HTTP path for the MCP endpoint.
     #[arg(long = "base-path", env = "RUSH_MCP_BASE_PATH", default_value = "/mcp")]
     pub base_path: String,
@@ -153,6 +157,9 @@ impl Config {
         check_scheme(self.web_url(), "--web-url")?;
         if self.max_result_bytes < 2_048 {
             return Err("--max-result-bytes must be at least 2048".into());
+        }
+        if self.max_http_sessions == 0 {
+            return Err("--max-http-sessions must be positive".into());
         }
         let has_key = self.api_key.is_some() || self.api_key_file.is_some();
         match self.transport {

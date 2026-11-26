@@ -1283,6 +1283,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "futures-core",
  "http",
  "reqwest",
  "rmcp",

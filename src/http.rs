@@ -10,14 +10,24 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-};
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::ClientKey;
+use crate::api::WhoAmI;
+use crate::client::{ApiError, ClientKey, RushClient};
 use crate::config::Config;
 use crate::server::{AppState, RushMcp};
+
+mod sessions;
+
+const MAX_PENDING_AUTHENTICATIONS: usize = 32;
+
+struct AuthState {
+    policy: AuthPolicy,
+    client: RushClient,
+    pending: Semaphore,
+}
 
 /// Who may use the MCP endpoint.
 #[derive(Clone)]
@@ -72,19 +82,54 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-async fn authenticate(State(policy): State<AuthPolicy>, mut req: Request, next: Next) -> Response {
-    match decide(&policy, req.headers()) {
+async fn authenticate(
+    State(state): State<Arc<AuthState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    match decide(&state.policy, req.headers()) {
         Decision::ClientKey(key) => {
-            req.extensions_mut().insert(ClientKey(key));
+            let key = ClientKey(key);
+            if let Err(status) = verify_client_key(&state, &key).await {
+                return if status == StatusCode::UNAUTHORIZED {
+                    unauthorized("Rush rejected the API key")
+                } else {
+                    status.into_response()
+                };
+            }
+            req.extensions_mut().insert(key);
             next.run(req).await
         }
         Decision::ServerKey => next.run(req).await,
-        Decision::Reject(message) => (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
-            message,
-        )
-            .into_response(),
+        Decision::Reject(message) => unauthorized(message),
+    }
+}
+
+fn unauthorized(message: &'static str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        message,
+    )
+        .into_response()
+}
+
+async fn verify_client_key(state: &AuthState, key: &ClientKey) -> Result<(), StatusCode> {
+    let _permit = state
+        .pending
+        .try_acquire()
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    match state
+        .client
+        .get::<WhoAmI>(Some(key), "http_auth", "/api/v1/whoami", &[])
+        .await
+    {
+        Ok(identity) if identity.principal.kind == "api_key" => Ok(()),
+        Ok(_) | Err(ApiError::Unauthorized(_) | ApiError::Forbidden(_)) => {
+            Err(StatusCode::UNAUTHORIZED)
+        }
+        Err(ApiError::RateLimited(_)) => Err(StatusCode::TOO_MANY_REQUESTS),
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 
@@ -101,16 +146,21 @@ pub async fn serve(state: Arc<AppState>, config: &Config) -> anyhow::Result<()> 
     let factory_state = state.clone();
     let mcp = StreamableHttpService::new(
         move || Ok(RushMcp::new(factory_state.clone())),
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(sessions::BoundedSessions::new(config.max_http_sessions)),
         http_config,
     );
     let policy = AuthPolicy {
         server_key: config.api_key.is_some() || config.api_key_file.is_some(),
         server_token: config.server_token.clone(),
     };
+    let auth_state = Arc::new(AuthState {
+        policy,
+        client: state.client.clone(),
+        pending: Semaphore::new(MAX_PENDING_AUTHENTICATIONS),
+    });
     let mcp_routes = Router::new()
         .nest_service(&config.base_path, mcp)
-        .layer(middleware::from_fn_with_state(policy, authenticate));
+        .layer(middleware::from_fn_with_state(auth_state, authenticate));
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
@@ -211,6 +261,60 @@ mod tests {
             decide(&policy, &headers(Some("Bearer whatever"))),
             Decision::Reject(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn byok_admission_requires_a_query_api_key_identity() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path},
+        };
+
+        let api = MockServer::start().await;
+        for (key, response) in [
+            (
+                "local-test-key",
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"principal":{"type":"api_key"}})),
+            ),
+            (
+                "local-test-anonymous",
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"principal":{"type":"anonymous"}})),
+            ),
+            ("local-test-rejected", ResponseTemplate::new(403)),
+        ] {
+            Mock::given(method("GET"))
+                .and(path("/api/v1/whoami"))
+                .and(header("authorization", format!("Bearer {key}")))
+                .respond_with(response)
+                .expect(1)
+                .mount(&api)
+                .await;
+        }
+        let state = AuthState {
+            policy: AuthPolicy {
+                server_key: false,
+                server_token: None,
+            },
+            client: RushClient::new(
+                api.uri().parse().unwrap(),
+                crate::client::KeySource::None,
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap(),
+            pending: Semaphore::new(1),
+        };
+        assert_eq!(
+            verify_client_key(&state, &ClientKey("local-test-key".into())).await,
+            Ok(())
+        );
+        for key in ["local-test-anonymous", "local-test-rejected"] {
+            assert_eq!(
+                verify_client_key(&state, &ClientKey(key.into())).await,
+                Err(StatusCode::UNAUTHORIZED)
+            );
+        }
     }
 
     #[test]
