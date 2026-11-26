@@ -80,7 +80,8 @@ pub struct Config {
     pub base_path: String,
 
     /// Bearer token clients must send to use the server's own API key in HTTP
-    /// mode. Required when listening on a non-loopback address with --api-key.
+    /// mode. Required with --api-key when listening on a non-loopback address
+    /// or when --allowed-hosts names a non-loopback host.
     #[arg(
         long = "server-token",
         env = "RUSH_MCP_SERVER_TOKEN",
@@ -173,17 +174,23 @@ impl Config {
             Transport::Stdio if !has_key => {
                 Err("stdio mode needs an API key: set RUSH_API_KEY or RUSH_API_KEY_FILE".into())
             }
-            Transport::Http
-                if has_key && self.server_token.is_none() && !self.listen.ip().is_loopback() =>
-            {
-                Err(
-                    "refusing to share the server's API key on a non-loopback address without \
-                     RUSH_MCP_SERVER_TOKEN; set a token or have clients send their own key"
-                        .into(),
-                )
-            }
+            Transport::Http if has_key && self.server_token.is_none() && !self.local_only() => Err(
+                "refusing to share the server's API key on a non-loopback address or \
+                 --allowed-hosts name without RUSH_MCP_SERVER_TOKEN; set a token or have \
+                 clients send their own key"
+                    .into(),
+            ),
             _ => Ok(()),
         }
+    }
+
+    /// Only local clients can reach the server: a loopback listen address and
+    /// no allowed Host that a reverse proxy could forward from the network.
+    fn local_only(&self) -> bool {
+        self.listen.ip().is_loopback()
+            && self.allowed_hosts.iter().all(|h| {
+                Url::parse(&format!("http://{}", h.trim())).is_ok_and(|u| is_loopback_host(&u))
+            })
     }
 }
 
@@ -265,6 +272,20 @@ mod tests {
         parse(&public).validate().unwrap();
         // Loopback, or no shared key at all, is fine.
         parse(&base).validate().unwrap();
+        let mut local_hosts = base.to_vec();
+        local_hosts.extend(["--allowed-hosts", "localhost:8090,127.0.0.1,[::1]"]);
+        parse(&local_hosts).validate().unwrap();
+        // A loopback bind behind a reverse proxy is still public.
+        let mut proxied = base.to_vec();
+        proxied.extend(["--allowed-hosts", "localhost,mcp.corp"]);
+        assert!(
+            parse(&proxied)
+                .validate()
+                .unwrap_err()
+                .contains("allowed-hosts")
+        );
+        proxied.extend(["--server-token", "t"]);
+        parse(&proxied).validate().unwrap();
         parse(&[
             "--url",
             "https://r.example.com",

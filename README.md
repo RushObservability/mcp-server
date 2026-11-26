@@ -244,7 +244,13 @@ There are two ways for clients to authenticate:
   minute, so a revoked key stops working within 60 seconds.
 - **Share the server's key.** Start the server with `RUSH_API_KEY` and clients
   send `Authorization: Bearer <RUSH_MCP_SERVER_TOKEN>`. The server refuses to
-  start this way on a non-loopback address without a server token.
+  start this way without a server token on a non-loopback address, or when
+  `--allowed-hosts` names a non-loopback host (a loopback bind behind a
+  reverse proxy is reachable from the network).
+
+Upgrading: a server that shares its key, listens on loopback and sets
+`--allowed-hosts` to a public name now fails to start until you set
+`RUSH_MCP_SERVER_TOKEN` or switch clients to their own keys.
 
 Set `--allowed-hosts` to the hostnames clients use, so DNS-rebinding attempts
 are rejected.
