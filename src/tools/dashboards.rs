@@ -912,10 +912,14 @@ impl RushMcp {
             if queries.is_empty() {
                 return Err(ToolError::Input("this widget has no visible queries".into()));
             }
-            let mut results = Vec::new();
-            for q in &queries {
-                results.push(self.run_widget_query(key, &widget.widget_type, q, &window).await?);
-            }
+            // At most five queries (widget_queries caps them); collecting in order
+            // keeps the first failing query's error, as the sequential loop did.
+            let results = futures_util::future::join_all(
+                queries.iter().map(|q| self.run_widget_query(key, &widget.widget_type, q, &window)),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
             let detail = results.first().map(|r| match (&r.metrics, r.total, r.groups.first()) {
                 (Some(m), _, _) => format!(
                     "; {} series{}",
