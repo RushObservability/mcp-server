@@ -995,9 +995,11 @@ pub struct SeriesSummary {
 
 impl Trim for MetricsResult {
     fn trim(&mut self) -> bool {
-        if let Some(s) = self.series.iter_mut().find(|s| s.points.len() > 10) {
-            let step = 2;
-            s.points = s.points.iter().step_by(step).copied().collect();
+        // Thin every series in one step, so a large result takes a few passes, not one per series.
+        if self.series.iter().any(|s| s.points.len() > 10) {
+            for s in self.series.iter_mut().filter(|s| s.points.len() > 10) {
+                s.points = s.points.iter().step_by(2).copied().collect();
+            }
             return true;
         }
         let n = self.series.len();
@@ -2514,6 +2516,41 @@ mod tests {
         assert_eq!(
             s.iter().map(|g| g.key.as_str()).collect::<Vec<_>>(),
             ["y", "z"]
+        );
+    }
+
+    #[test]
+    fn metrics_trim_thins_all_series_per_step() {
+        let result = || MetricsResult {
+            query: "q".into(),
+            result_type: "matrix".into(),
+            series_total: 100,
+            series: (0..100)
+                .map(|i| SeriesSummary {
+                    labels: BTreeMap::from([("service".into(), format!("svc-{i}"))]),
+                    last: Some(1.0),
+                    min: Some(1.0),
+                    max: Some(1.0),
+                    avg: Some(1.0),
+                    point_count: 60,
+                    points: (0..60).map(|p| (p as f64, 1.5)).collect(),
+                })
+                .collect(),
+        };
+        let mut r = result();
+        let mut steps = 0;
+        while Envelope::new("s", &r).size() > 16_384 && r.trim() {
+            steps += 1;
+        }
+        assert!(steps < 10, "{steps} trim steps");
+        let env = Envelope::new("s", result()).fit(16_384);
+        assert!(env.truncated && env.size() <= 16_384);
+        let series = &env.result.series;
+        assert!(series.len() > 1);
+        assert!(
+            series
+                .iter()
+                .all(|s| s.points.len() == series[0].points.len())
         );
     }
 
