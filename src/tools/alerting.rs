@@ -19,7 +19,7 @@ use crate::api::{
 };
 use crate::client::ApiError;
 use crate::envelope::{Envelope, Hint, Trim, clip};
-use crate::links::id_from;
+use crate::links::{id_from, is_plain_id};
 use crate::server::{RushMcp, ToolError};
 use crate::time::{TimeArgs, Window, parse_duration};
 use crate::tools::{keep, pop, round2};
@@ -909,6 +909,11 @@ fn correlations_out(c: Correlations) -> Option<CorrelationOut> {
 
 // ── Tools ─────────────────────────────────────────────────────────────────
 
+/// The rule ID comes from upstream data, so it is checked before it goes in a path.
+fn anomaly_rule_path(rule_id: &str) -> Option<String> {
+    is_plain_id(rule_id).then(|| format!("/api/v1/anomaly-rules/{rule_id}"))
+}
+
 fn needs_id(raw: &str, segment: &str, what: &str) -> Result<String, ToolError> {
     id_from(raw, segment).ok_or_else(|| {
         ToolError::Input(format!("`{raw}` is not a {what} ID or a Rush {what} link"))
@@ -1226,13 +1231,21 @@ impl RushMcp {
                     &[],
                 )
                 .await?;
-            let rule_path = format!("/api/v1/anomaly-rules/{}", event.rule_id);
+            let rule_path = anomaly_rule_path(&event.rule_id);
             let corr_path = format!("/api/v1/anomaly-events/{id}/correlations");
             let (rule, corr) = tokio::join!(
-                c.get::<AnomalyRuleResponse>(key, "get_anomaly", &rule_path, &[]),
+                async {
+                    match &rule_path {
+                        Some(p) => c
+                            .get::<AnomalyRuleResponse>(key, "get_anomaly", p, &[])
+                            .await
+                            .ok(),
+                        None => None,
+                    }
+                },
                 c.get::<Correlations>(key, "get_anomaly", &corr_path, &[]),
             );
-            let rule = rule.ok().map(|r| r.rule);
+            let rule = rule.map(|r| r.rule);
             let mut out = anomaly_out(&event);
             if let Some(r) = &rule {
                 out.rule = r.name.clone();
