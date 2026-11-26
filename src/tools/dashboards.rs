@@ -24,7 +24,7 @@ use crate::links::id_from;
 use crate::server::{RushMcp, ToolError};
 use crate::time::{TimeArgs, Window, bucket_for};
 use crate::tools::core::{MetricsResult, shape_prom};
-use crate::tools::{keep, pop, round2};
+use crate::tools::{keep, pop, quoted, round2};
 
 fn strings(v: &serde_json::Value) -> Vec<String> {
     v.as_array()
@@ -817,7 +817,7 @@ impl RushMcp {
             Ok(Envelope::new(
                 format!(
                     "{}: {} widgets, {} variables.",
-                    result.name,
+                    quoted(&result.name),
                     result.widgets.len(),
                     result.variables.len()
                 ),
@@ -868,7 +868,7 @@ impl RushMcp {
                 .unwrap_or(0);
             let links = self.links(key).await;
             Ok(Envelope::new(
-                format!("{name}: full definition with {widgets} widgets."),
+                format!("{}: full definition with {widgets} widgets.", quoted(&name)),
                 DashboardDefinition { definition: def },
             )
             .link("dashboard", links.dashboard(&id, None)))
@@ -923,13 +923,13 @@ impl RushMcp {
                     m.series.first().and_then(|s| s.last).map(|v| format!(", first ends at {v}")).unwrap_or_default()
                 ),
                 (None, Some(total), _) => format!("; total {total}"),
-                (None, None, Some(g)) => format!("; largest group {} ({})", g.key, g.value),
+                (None, None, Some(g)) => format!("; largest group {} ({})", quoted(&g.key), g.value),
                 _ => String::new(),
             });
             let summary = format!(
                 "{} ({}): {} quer{}{}.",
-                widget.title,
-                widget.widget_type,
+                quoted(&widget.title),
+                clip(&widget.widget_type, 40),
                 results.len(),
                 if results.len() == 1 { "y" } else { "ies" },
                 detail.unwrap_or_default()

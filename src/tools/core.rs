@@ -26,8 +26,8 @@ use crate::links::{Links, Signal, trace_id_from};
 use crate::server::{RushMcp, ToolError};
 use crate::time::{TimeArgs, bucket_for, parse_duration};
 use crate::tools::{
-    Point, Query, QueryArgs, compress, keep, minutes_ending_now, ms, ns_to_time, pct, pop, round2,
-    thin, thousands, top,
+    Point, Query, QueryArgs, compress, keep, minutes_ending_now, ms, ns_to_time, pct, pop, quoted,
+    round2, thin, thousands, top,
 };
 
 fn signal_link(kind: SignalKind) -> Signal {
@@ -1281,7 +1281,7 @@ impl RushMcp {
         let top_service = result
             .by_service
             .first()
-            .map(|k| format!("; top service {} ({})", k.key, thousands(k.count)))
+            .map(|k| format!("; top service {} ({})", quoted(&k.key), thousands(k.count)))
             .unwrap_or_default();
         let links = self.links(key).await;
         let mut env = Envelope::new(
@@ -1650,7 +1650,11 @@ impl RushMcp {
                     values.len(),
                     values
                         .first()
-                        .map(|v| format!("; most common {} ({})", v.key, thousands(v.count)))
+                        .map(|v| format!(
+                            "; most common {} ({})",
+                            quoted(&v.key),
+                            thousands(v.count)
+                        ))
                         .unwrap_or_default()
                 ),
                 FieldValues {
@@ -1823,8 +1827,8 @@ impl RushMcp {
                 + result.group_series.iter().map(|g| g.total).sum::<u64>();
             let links = self.links(key).await;
             let summary = match (&group_by, result.groups.first(), result.group_series.first()) {
-                (Some(g), Some(first), _) => format!("{} groups by {g}; largest {} ({}).", result.groups.len(), first.key, thousands(first.count)),
-                (Some(g), None, Some(first)) => format!("{} series by {g}; largest {} ({}).", result.group_series.len(), first.key, thousands(first.total)),
+                (Some(g), Some(first), _) => format!("{} groups by {g}; largest {} ({}).", result.groups.len(), quoted(&first.key), thousands(first.count)),
+                (Some(g), None, Some(first)) => format!("{} series by {g}; largest {} ({}).", result.group_series.len(), quoted(&first.key), thousands(first.total)),
                 _ => format!("{} {} over {} points.", thousands(total), kind_name(args.signal), result.series.len()),
             };
             let mut env = Envelope::new(summary, result)
@@ -1930,7 +1934,11 @@ impl RushMcp {
                 "{total} services{}.",
                 worst
                     .filter(|w| w.errors > 0)
-                    .map(|w| format!("; highest error rate {} ({}%)", w.service, w.error_rate_pct))
+                    .map(|w| format!(
+                        "; highest error rate {} ({}%)",
+                        quoted(&w.service),
+                        w.error_rate_pct
+                    ))
                     .unwrap_or_default()
             );
             let mut env = Envelope::new(

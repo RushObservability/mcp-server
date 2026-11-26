@@ -28,7 +28,7 @@ use crate::investigations::{Live, Progress, Step, follow};
 use crate::links::{Signal, id_from};
 use crate::server::{RushMcp, ToolError};
 use crate::time::TimeArgs;
-use crate::tools::{MAX_SEARCH_CHARS, pop, round2};
+use crate::tools::{MAX_SEARCH_CHARS, pop, quoted, round2};
 
 /// Longest a started run is followed, matching the agent's own limits.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -440,7 +440,7 @@ fn summarize(inv: &Investigation) -> String {
     let title = if inv.title.is_empty() {
         "Investigation".to_string()
     } else {
-        format!("\"{}\"", clip(&inv.title, 80))
+        quoted(&inv.title)
     };
     let steps = inv.steps.len() + inv.steps_omitted;
     match inv.status.as_str() {
@@ -456,7 +456,7 @@ fn summarize(inv: &Investigation) -> String {
         }
         "failed" => format!(
             "{title} failed: {}",
-            inv.error.as_deref().unwrap_or("unknown error")
+            clip(inv.error.as_deref().unwrap_or("unknown error"), 300)
         ),
         "stalled" => format!(
             "{title} has had no report for over {STALLED_AFTER_MINUTES} minutes; it most likely failed."
@@ -934,7 +934,7 @@ impl RushMcp {
                 if filters.len() == 1 { "" } else { "s" },
                 search
                     .as_deref()
-                    .map(|s| format!(" and search \"{}\"", clip(s, 80)))
+                    .map(|s| format!(" and search {}", quoted(s)))
                     .unwrap_or_default()
             );
             let mut env = Envelope::new(

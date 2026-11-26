@@ -16,7 +16,7 @@ use crate::links::saved_query_id_from;
 use crate::server::{RushMcp, ToolError};
 use crate::time::TimeArgs;
 use crate::tools::core::{LogSearch, SpanSearch};
-use crate::tools::{Query, keep};
+use crate::tools::{Query, keep, quoted};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListSavedQueriesArgs {
@@ -264,8 +264,7 @@ impl RushMcp {
                         spans: Some(spans),
                     }),
             };
-            let name = env.result.saved_query.name.clone();
-            let summary = format!("{name}: {}", env.summary);
+            let summary = format!("{}: {}", quoted(&env.result.saved_query.name), env.summary);
             let mut env = env.link("saved_query", links.saved_query(&id));
             env.summary = summary;
             Ok(env)

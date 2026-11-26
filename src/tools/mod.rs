@@ -172,6 +172,12 @@ pub fn pct(part: u64, whole: u64) -> f64 {
 }
 
 /// "1,284" style grouping for summaries.
+/// Telemetry or user-set text for a summary line: clipped, and quoted with
+/// `"` and newlines escaped so it cannot read as the server's own words.
+pub fn quoted(s: &str) -> String {
+    format!("{:?}", crate::envelope::clip(s, 80))
+}
+
 pub fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();

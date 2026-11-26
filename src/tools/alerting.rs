@@ -22,7 +22,7 @@ use crate::envelope::{Envelope, Hint, Trim, clip};
 use crate::links::{id_from, is_plain_id};
 use crate::server::{RushMcp, ToolError};
 use crate::time::{TimeArgs, Window, parse_duration};
-use crate::tools::{keep, pop, round2};
+use crate::tools::{keep, pop, quoted, round2};
 
 fn severity_rank(state: &str, enabled: bool) -> u8 {
     if !enabled {
@@ -977,7 +977,7 @@ impl RushMcp {
             let m = &result.monitor;
             let summary = format!(
                 "{} ({} monitor) is {}{}; {} recent state changes.",
-                m.name,
+                quoted(&m.name),
                 m.monitor_type,
                 m.state,
                 if m.muted { ", muted" } else { "" },
@@ -1072,7 +1072,7 @@ impl RushMcp {
                 .first()
                 .and_then(|s| {
                     s.budget_remaining_pct
-                        .map(|b| format!("; least budget left: {} ({b}%)", s.name))
+                        .map(|b| format!("; least budget left: {} ({b}%)", quoted(&s.name)))
                 })
                 .unwrap_or_default();
             let links = self.links(key).await;
@@ -1124,7 +1124,7 @@ impl RushMcp {
             let b = &result.slo;
             let summary = format!(
                 "{} is {}: target {}%, measured {}, {} of the error budget left.",
-                b.name,
+                quoted(&b.name),
                 b.state,
                 b.target_pct,
                 b.sli_pct
@@ -1163,7 +1163,7 @@ impl RushMcp {
                     &insights_query(&window),
                 )
                 .await?;
-            let summary = format!("{}.", resp.summary);
+            let summary = format!("{}.", clip(&resp.summary, 300));
             let result = shape_insights(resp);
             let links = self.links(key).await;
             Ok(Envelope::new(summary, result)
@@ -1194,7 +1194,9 @@ impl RushMcp {
             let summary = match result.anomalies.first().filter(|_| !args.include_resolved) {
                 Some(top) => format!(
                     "{} open anomalies; e.g. {} at {}σ.",
-                    result.open, top.rule, top.deviation_sigma
+                    result.open,
+                    quoted(&top.rule),
+                    top.deviation_sigma
                 ),
                 None if args.include_resolved => format!(
                     "{} recent anomaly events; {} rules currently anomalous.",
@@ -1259,7 +1261,12 @@ impl RushMcp {
             let e = &result.event;
             let summary = format!(
                 "{} ({}): value {} vs expected {} ({}σ) at {}.",
-                e.rule, e.state, e.value, e.expected, e.deviation_sigma, e.time
+                quoted(&e.rule),
+                e.state,
+                e.value,
+                e.expected,
+                e.deviation_sigma,
+                e.time
             );
             let links = self.links(key).await;
             Ok(Envelope::new(summary, result)
