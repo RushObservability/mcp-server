@@ -2219,9 +2219,11 @@ impl RushMcp {
             }
             let path = match &label {
                 Some(l) => {
+                    // `.` and `..` alone are path segments Url::join would resolve.
                     if !l
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+                        || l.chars().all(|c| c == '.')
                     {
                         return Err(ToolError::Input(format!("`{l}` is not a valid label name")));
                     }
