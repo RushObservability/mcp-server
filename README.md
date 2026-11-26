@@ -220,6 +220,8 @@ hour).
 | `--transport` | | `stdio` | `stdio` or `http` |
 | `--listen` | `RUSH_MCP_LISTEN` | `127.0.0.1:8090` | HTTP listen address |
 | `--base-path` | `RUSH_MCP_BASE_PATH` | `/mcp` | HTTP path for the MCP endpoint |
+| `--max-http-sessions` | `RUSH_MCP_MAX_HTTP_SESSIONS` | `256` | Concurrent HTTP MCP sessions |
+| `--max-http-sessions-per-key` | `RUSH_MCP_MAX_HTTP_SESSIONS_PER_KEY` | `32` | Concurrent HTTP MCP sessions per client key (the server token counts as one key) |
 | `--server-token` | `RUSH_MCP_SERVER_TOKEN` | | Token clients must send to use the server's own key in HTTP mode |
 | `--allowed-hosts` | `RUSH_MCP_ALLOWED_HOSTS` | loopback | Accepted `Host` headers in HTTP mode |
 | `--allowed-origins` | `RUSH_MCP_ALLOWED_ORIGINS` | | Accepted browser `Origin`s in HTTP mode |
@@ -246,6 +248,11 @@ There are two ways for clients to authenticate:
 
 Set `--allowed-hosts` to the hostnames clients use, so DNS-rebinding attempts
 are rejected.
+
+A session can only be used with the key that opened it; any other key gets
+404 for that session ID. One key may hold at most
+`--max-http-sessions-per-key` sessions and 4 running SRE agent investigations,
+so a single client can't take every slot.
 
 ## Security
 

@@ -23,6 +23,8 @@ use crate::envelope::clip;
 const KEEP_FINISHED: Duration = Duration::from_secs(15 * 60);
 /// Runs this server streams at once; more are refused.
 const MAX_RUNNING: usize = 32;
+/// Runs one key streams at once, so one key can't take every slot.
+const MAX_RUNNING_PER_KEY: usize = 4;
 /// Tool steps kept per run.
 const MAX_STEPS: usize = 200;
 const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
@@ -185,7 +187,7 @@ pub struct Investigations {
 
 impl Investigations {
     /// Identifies the credential that started a run without keeping the key.
-    fn owner(&self, key: Option<&ClientKey>) -> u64 {
+    pub(crate) fn owner(&self, key: Option<&ClientKey>) -> u64 {
         self.hasher
             .hash_one(key.map(|k| k.0.as_str()).unwrap_or(""))
     }
@@ -202,14 +204,21 @@ impl Investigations {
 
     /// Register a new run, or refuse when too many are streaming.
     pub fn begin(&self, key: Option<&ClientKey>) -> Result<Arc<Live>, String> {
+        let owner = self.owner(key);
         let mut runs = self.runs();
-        if runs.iter().filter(|r| !r.progress().finished).count() >= MAX_RUNNING {
+        let running: Vec<_> = runs.iter().filter(|r| !r.progress().finished).collect();
+        if running.len() >= MAX_RUNNING {
             return Err(format!(
                 "this server is already following {MAX_RUNNING} SRE agent investigations; wait for one to finish"
             ));
         }
+        if running.iter().filter(|r| r.owner == owner).count() >= MAX_RUNNING_PER_KEY {
+            return Err(format!(
+                "this key already has {MAX_RUNNING_PER_KEY} SRE agent investigations running; wait for one to finish"
+            ));
+        }
         let live = Arc::new(Live {
-            owner: self.owner(key),
+            owner,
             progress: Mutex::new(Progress::default()),
             changed: Notify::new(),
         });
@@ -443,9 +452,28 @@ mod tests {
     #[test]
     fn too_many_streams_are_refused() {
         let runs = Investigations::default();
-        for _ in 0..MAX_RUNNING {
-            runs.begin(None).unwrap();
+        for i in 0..MAX_RUNNING {
+            runs.begin(Some(&ClientKey(format!(
+                "rush_qry_{}",
+                i / MAX_RUNNING_PER_KEY
+            ))))
+            .unwrap();
         }
-        assert!(runs.begin(None).is_err());
+        assert!(runs.begin(Some(&ClientKey("rush_qry_new".into()))).is_err());
+    }
+
+    #[test]
+    fn one_key_cannot_take_every_stream() {
+        let runs = Investigations::default();
+        let mine = ClientKey("rush_qry_mine".into());
+        for _ in 0..MAX_RUNNING_PER_KEY {
+            runs.begin(Some(&mine)).unwrap();
+        }
+        assert!(runs.begin(Some(&mine)).unwrap_err().contains("this key"));
+        assert!(
+            runs.begin(Some(&ClientKey("rush_qry_other".into())))
+                .is_ok()
+        );
+        assert!(runs.begin(None).is_ok());
     }
 }

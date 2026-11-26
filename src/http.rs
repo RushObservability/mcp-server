@@ -14,12 +14,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use rmcp::transport::{
+    common::http_header::HEADER_SESSION_ID,
+    streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService},
+};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::WhoAmI;
-use crate::client::{ApiError, ClientKey, RushClient};
+use crate::client::{ApiError, ClientKey};
 use crate::config::Config;
 use crate::server::{AppState, RushMcp};
 
@@ -38,7 +41,8 @@ type Verdicts = HashMap<u64, (Result<(), StatusCode>, Instant)>;
 
 struct AuthState {
     policy: AuthPolicy,
-    client: RushClient,
+    app: Arc<AppState>,
+    sessions: Arc<sessions::BoundedSessions>,
     pending: Semaphore,
     /// rmcp checks Host too, but only after this middleware has run.
     allowed_hosts: Vec<String>,
@@ -48,10 +52,16 @@ struct AuthState {
 }
 
 impl AuthState {
-    fn new(policy: AuthPolicy, client: RushClient, allowed_hosts: Vec<String>) -> Self {
+    fn new(
+        policy: AuthPolicy,
+        app: Arc<AppState>,
+        sessions: Arc<sessions::BoundedSessions>,
+        allowed_hosts: Vec<String>,
+    ) -> Self {
         Self {
             policy,
-            client,
+            app,
+            sessions,
             pending: Semaphore::new(MAX_PENDING_AUTHENTICATIONS),
             allowed_hosts,
             hasher: RandomState::new(),
@@ -156,7 +166,7 @@ async fn authenticate(
         )
             .into_response();
     }
-    match decide(&state.policy, req.headers()) {
+    let key = match decide(&state.policy, req.headers()) {
         Decision::ClientKey(key) => {
             let key = ClientKey(key);
             if let Err(status) = verify_client_key(&state, &key).await {
@@ -166,12 +176,27 @@ async fn authenticate(
                     status.into_response()
                 };
             }
-            req.extensions_mut().insert(key);
-            next.run(req).await
+            Some(key)
         }
-        Decision::ServerKey => next.run(req).await,
-        Decision::Reject(message) => unauthorized(message),
+        Decision::ServerKey => None,
+        Decision::Reject(message) => return unauthorized(message),
+    };
+    // A session belongs to the credential that opened it; to anyone else it doesn't exist.
+    let owner = state.app.investigations.owner(key.as_ref());
+    let session = req
+        .headers()
+        .get(HEADER_SESSION_ID)
+        .and_then(|v| v.to_str().ok());
+    if session
+        .and_then(|id| state.sessions.owner_of(id))
+        .is_some_and(|o| o != owner)
+    {
+        return (StatusCode::NOT_FOUND, "Session not found").into_response();
     }
+    if let Some(key) = key {
+        req.extensions_mut().insert(key);
+    }
+    sessions::OWNER.scope(owner, next.run(req)).await
 }
 
 fn unauthorized(message: &'static str) -> Response {
@@ -223,6 +248,7 @@ async fn verify_client_key(state: &AuthState, key: &ClientKey) -> Result<(), Sta
         return result;
     }
     let result = match state
+        .app
         .client
         .get::<WhoAmI>(Some(key), "http_auth", "/api/v1/whoami", &[])
         .await
@@ -240,6 +266,19 @@ async fn verify_client_key(state: &AuthState, key: &ClientKey) -> Result<(), Sta
 
 pub async fn serve(state: Arc<AppState>, config: &Config) -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
+    let app = app(state, config, &shutdown);
+    let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    tracing::info!(address = %config.listen, path = %config.base_path, "serving MCP over streamable HTTP");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            shutdown.cancel();
+        })
+        .await?;
+    Ok(())
+}
+
+fn app(state: Arc<AppState>, config: &Config, shutdown: &CancellationToken) -> Router {
     let mut http_config = StreamableHttpServerConfig::default();
     http_config.json_response = true;
     http_config.cancellation_token = shutdown.child_token();
@@ -250,35 +289,34 @@ pub async fn serve(state: Arc<AppState>, config: &Config) -> anyhow::Result<()> 
 
     let allowed_hosts = http_config.allowed_hosts.clone();
     let factory_state = state.clone();
+    let sessions = Arc::new(sessions::BoundedSessions::new(
+        config.max_http_sessions,
+        config.max_http_sessions_per_key,
+    ));
     let mcp = StreamableHttpService::new(
         move || Ok(RushMcp::new(factory_state.clone())),
-        Arc::new(sessions::BoundedSessions::new(config.max_http_sessions)),
+        sessions.clone(),
         http_config,
     );
     let policy = AuthPolicy {
         server_key: config.api_key.is_some() || config.api_key_file.is_some(),
         server_token: config.server_token.clone(),
     };
-    let auth_state = Arc::new(AuthState::new(policy, state.client.clone(), allowed_hosts));
+    let auth_state = Arc::new(AuthState::new(
+        policy,
+        state.clone(),
+        sessions,
+        allowed_hosts,
+    ));
     let mcp_routes = Router::new()
         .nest_service(&config.base_path, mcp)
         .layer(middleware::from_fn_with_state(auth_state, authenticate));
-    let app = Router::new()
+    Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .with_state(state)
-        .merge(mcp_routes);
-
-    let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    tracing::info!(address = %config.listen, path = %config.base_path, "serving MCP over streamable HTTP");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            shutdown.cancel();
-        })
-        .await?;
-    Ok(())
+        .merge(mcp_routes)
 }
 
 /// Ready when the Rush API answers.
@@ -365,18 +403,33 @@ mod tests {
         ));
     }
 
+    use crate::client::RushClient;
+
+    async fn listen(app: Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        addr
+    }
+
     fn auth_state(api: &wiremock::MockServer, permits: usize) -> AuthState {
+        let client = RushClient::new(
+            api.uri().parse().unwrap(),
+            crate::client::KeySource::None,
+            Duration::from_secs(2),
+        )
+        .unwrap();
         let mut state = AuthState::new(
             AuthPolicy {
                 server_key: false,
                 server_token: None,
             },
-            RushClient::new(
+            Arc::new(AppState::for_tests(
+                client,
                 api.uri().parse().unwrap(),
-                crate::client::KeySource::None,
-                Duration::from_secs(2),
-            )
-            .unwrap(),
+                vec![],
+            )),
+            Arc::new(sessions::BoundedSessions::new(8, 8)),
             vec!["localhost".into(), "127.0.0.1".into()],
         );
         state.pending = Semaphore::new(permits);
@@ -472,9 +525,7 @@ mod tests {
         let app = Router::new().route("/mcp", get(|| async { "ok" })).layer(
             middleware::from_fn_with_state(Arc::new(auth_state(&api, 1)), authenticate),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await });
+        let addr = listen(app).await;
 
         let http = reqwest::Client::new();
         let call = |host: &'static str| {
@@ -486,6 +537,110 @@ mod tests {
         assert_eq!(call("evil.example").await.unwrap().status(), 403);
         assert_eq!(call("evil.example:80").await.unwrap().status(), 403);
         assert_eq!(call("localhost").await.unwrap().status(), 200);
+    }
+
+    #[tokio::test]
+    async fn sessions_belong_to_the_key_that_opened_them() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+        let api = MockServer::start().await;
+        Mock::given(path("/api/v1/whoami"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"principal":{"type":"api_key"}})),
+            )
+            .mount(&api)
+            .await;
+        let config = <Config as clap::Parser>::try_parse_from([
+            "rush-mcp",
+            "--url",
+            &api.uri(),
+            "--transport",
+            "http",
+            "--max-http-sessions-per-key",
+            "1",
+        ])
+        .unwrap();
+        let client = RushClient::new(
+            api.uri().parse().unwrap(),
+            crate::client::KeySource::None,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let state = Arc::new(AppState::for_tests(
+            client,
+            api.uri().parse().unwrap(),
+            vec![],
+        ));
+        let addr = listen(app(state, &config, &CancellationToken::new())).await;
+
+        let http = reqwest::Client::new();
+        let post = |key: &str, session: Option<&str>, body: serde_json::Value| {
+            let mut req = http
+                .post(format!("http://{addr}/mcp"))
+                .header(header::HOST, "localhost")
+                .header(header::ACCEPT, "application/json, text/event-stream")
+                .bearer_auth(key)
+                .json(&body);
+            if let Some(id) = session {
+                req = req.header(HEADER_SESSION_ID, id);
+            }
+            req.send()
+        };
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        });
+        let initialized =
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+
+        let opened = post("rush_qry_mine", None, initialize.clone())
+            .await
+            .unwrap();
+        assert_eq!(opened.status(), 200);
+        let id = opened.headers()[HEADER_SESSION_ID]
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Another key holding the session ID is told the session doesn't exist.
+        let stolen = post("rush_qry_other", Some(&id), initialized.clone())
+            .await
+            .unwrap();
+        assert_eq!(stolen.status(), 404);
+        let resumed = http
+            .get(format!("http://{addr}/mcp"))
+            .header(header::HOST, "localhost")
+            .header(header::ACCEPT, "text/event-stream")
+            .header(HEADER_SESSION_ID, &id)
+            .header("last-event-id", "0")
+            .bearer_auth("rush_qry_other")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resumed.status(), 404);
+        let own = post("rush_qry_mine", Some(&id), initialized).await.unwrap();
+        assert_eq!(own.status(), 202);
+
+        // One session per key here: the second is refused, another key still gets one.
+        assert!(
+            !post("rush_qry_mine", None, initialize.clone())
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert_eq!(
+            post("rush_qry_other", None, initialize)
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
     }
 
     #[test]
