@@ -238,6 +238,8 @@ There are two ways for clients to authenticate:
 
 - **Bring their own key.** Clients send `Authorization: Bearer rush_qry_…`
   and the server uses that key for their calls. No server key is needed.
+  The server checks each key with Rush and reuses the answer for up to a
+  minute, so a revoked key stops working within 60 seconds.
 - **Share the server's key.** Start the server with `RUSH_API_KEY` and clients
   send `Authorization: Bearer <RUSH_MCP_SERVER_TOKEN>`. The server refuses to
   start this way on a non-loopback address without a server token.
