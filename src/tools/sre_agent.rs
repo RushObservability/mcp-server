@@ -564,12 +564,9 @@ impl RushMcp {
         id: &str,
         live: Option<&Arc<Live>>,
     ) -> Result<Envelope<Investigation>, ToolError> {
-        let (detail, note) = match self.session_detail(key, tool, id).await {
-            Ok(d) => (d, None),
-            // The run is known from its stream even if the read fails.
-            Err(e) if live.is_some() => (SessionDetail::default(), Some(e.to_string())),
-            Err(e) => return Err(e),
-        };
+        // The local stream is only evidence. Rush remains the authorization
+        // boundary for the session, including after a key is revoked.
+        let detail = self.session_detail(key, tool, id).await?;
         let inv = {
             let progress = live.map(|l| l.progress());
             build_investigation(id, &detail, progress.as_deref(), Utc::now())
@@ -579,11 +576,6 @@ impl RushMcp {
             Envelope::new(summarize(&inv), inv).link("investigation", links.sre_session(id));
         for h in hints_for(&env.result) {
             env = env.hint(h);
-        }
-        if let Some(n) = note {
-            env = env.hint(Hint::new(format!(
-                "Couldn't read the stored session from Rush: {n}"
-            )));
         }
         Ok(env)
     }
@@ -972,6 +964,44 @@ impl RushMcp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cached_progress_requires_a_successful_session_read() {
+        use crate::{
+            client::{KeySource, RushClient},
+            server::AppState,
+            toolsets::Toolset,
+        };
+        use std::sync::Arc;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/sessions/test-session"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(1)
+            .mount(&api)
+            .await;
+        let base = url::Url::parse(&api.uri()).unwrap();
+        let client = RushClient::new(
+            base.clone(),
+            KeySource::Static("local-test-credential".into()),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let state = Arc::new(AppState::for_tests(client, base, vec![Toolset::SreAgent]));
+        let progress = state.investigations.begin(None).unwrap();
+        let mcp = RushMcp::new(state);
+        assert!(
+            mcp.investigation_envelope(None, "get_investigation", "test-session", Some(&progress))
+                .await
+                .is_err()
+        );
+    }
+
     use crate::api::{InvestigationSession, ParsedFilter};
     use serde_json::json;
 
